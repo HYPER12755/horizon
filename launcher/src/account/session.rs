@@ -2,7 +2,7 @@
 //! public status; credentials stay behind SecretStore and the existing session-file handoff.
 use super::*;
 use std::fs::{File, OpenOptions};
-use std::sync::MutexGuard;
+use std::sync::{Arc, LazyLock, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// Public progress only; no account credentials or provider response bodies.
@@ -233,18 +233,69 @@ pub fn refresh(who: &str) -> Result<Status, String> {
 }
 
 pub fn refresh_with_progress(who: &str, progress: &dyn Fn(Phase)) -> Result<Status, String> {
+    refresh_for_launcher(who, true, progress)
+}
+
+/// Scheduled refreshes check expiry under the same lock as the renewal.
+pub fn refresh_if_due_with_progress(who: &str, progress: &dyn Fn(Phase)) -> Result<Status, String> {
+    refresh_for_launcher(who, false, progress)
+}
+
+#[derive(Clone)]
+pub(super) struct CompletedRefresh {
+    checked: Check,
+    saved: Secrets,
+}
+
+impl CompletedRefresh {
+    pub(super) fn for_secrets(self, current: &Secrets) -> Option<Check> {
+        // Sign-out, sign-in or a refresh in another process can change the saved credentials.
+        (self.saved == *current).then_some(self.checked)
+    }
+}
+
+type RefreshFlight = Arc<Mutex<Option<CompletedRefresh>>>;
+pub(super) type Refreshes = HashMap<String, RefreshFlight>;
+static REFRESHES: LazyLock<Mutex<Refreshes>> = LazyLock::new(Mutex::default);
+
+pub(super) fn pending_refreshes() -> Refreshes {
+    REFRESHES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn refresh_for_launcher(
+    who: &str,
+    force: bool,
+    progress: &dyn Fn(Phase),
+) -> Result<Status, String> {
     let account = Accounts::load()
         .find(who)
         .cloned()
         .ok_or("That account isn't signed in.")?;
-    Ok(refresh_account(
+    let flight = RefreshFlight::default();
+    let mut completed = flight.lock().expect("new refresh");
+    REFRESHES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(account.uuid.clone(), flight.clone());
+    let (status, result) = refresh_and_record(
         &Endpoints::live(),
         client_id().as_deref(),
         store(),
         &account,
         &Accounts::path(),
         progress,
-    ))
+        force,
+    );
+    *completed = result;
+    drop(completed);
+    let mut flights = REFRESHES.lock().unwrap_or_else(|e| e.into_inner());
+    if flights
+        .get(&account.uuid)
+        .is_some_and(|f| Arc::ptr_eq(f, &flight))
+    {
+        flights.remove(&account.uuid);
+    }
+    Ok(status)
 }
 
 #[cfg(test)]
@@ -267,55 +318,77 @@ pub(super) fn refresh_account(
     accounts: &Path,
     progress: &dyn Fn(Phase),
 ) -> Status {
+    refresh_and_record(ep, client_id, store, account, accounts, progress, true).0
+}
+
+pub(super) fn refresh_and_record(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    store: &dyn SecretStore,
+    account: &Account,
+    accounts: &Path,
+    progress: &dyn Fn(Phase),
+    force: bool,
+) -> (Status, Option<CompletedRefresh>) {
     let result = (|| {
         progress(Phase::Queued);
         let _operation = lock(store)?;
         progress(Phase::Keychain);
         let Some(secrets) = read(store, &account.uuid)? else {
-            return Ok(Status::from_secrets(None));
+            return Ok((Status::from_secrets(None), None));
         };
-        let before =
-            serde_json::to_string(&secrets).map_err(|_| "Could not read the saved sign-in.")?;
-        let (mut status, secrets) =
-            match check_with(ep, client_id, account, secrets, true, progress) {
-                Check::Owns(renewed, s) => {
-                    // A new name or skin goes to accounts.json, as launch() saves it, so the
-                    // row and its profile head follow the refresh, not the next Play.
-                    let mut saved = Accounts::load_from(accounts);
-                    if saved
-                        .accounts
-                        .iter()
-                        .any(|a| a.uuid == renewed.uuid && *a != renewed)
-                    {
-                        saved.update(renewed);
-                        let _ = saved.save_to(accounts);
-                    }
-                    (Status::from_secrets(Some(&s)), s)
+        if !force {
+            let status = Status::from_secrets(Some(&secrets));
+            if status.state != State::NeedsRefresh {
+                return Ok((status, None));
+            }
+        }
+        let checked = check_with(ep, client_id, account, secrets.clone(), true, progress);
+        let before = secrets;
+        let (mut status, secrets) = match checked.clone() {
+            Check::Owns(renewed, s) => {
+                // A new name or skin goes to accounts.json, as launch() saves it, so the
+                // row and its profile head follow the refresh, not the next Play.
+                let mut saved = Accounts::load_from(accounts);
+                if saved
+                    .accounts
+                    .iter()
+                    .any(|a| a.uuid == renewed.uuid && *a != renewed)
+                {
+                    saved.update(renewed);
+                    let _ = saved.save_to(accounts);
                 }
-                Check::DoesNot(s) => (Status::from_secrets(Some(&s)), s),
-                Check::NoAnswer(e, s) => {
-                    let mut status = Status::from_secrets(Some(&s));
-                    if !s.sign_in_required {
-                        status.state = State::Retry;
-                    }
-                    status.message = e;
-                    (status, s)
+                (Status::from_secrets(Some(&s)), s)
+            }
+            Check::DoesNot(s) => (Status::from_secrets(Some(&s)), s),
+            Check::NoAnswer(e, s) => {
+                let mut status = Status::from_secrets(Some(&s));
+                if !s.sign_in_required {
+                    status.state = State::Retry;
                 }
-            };
-        let after =
-            serde_json::to_string(&secrets).map_err(|_| "Could not save the renewed sign-in.")?;
-        if before != after {
+                status.message = e;
+                (status, s)
+            }
+        };
+        let saved = if before != secrets {
             progress(Phase::Saving);
-        }
-        if before != after && store.set(&account.uuid, &after).is_err() {
-            status.state = State::Retry;
-            status.message =
-                "The renewed sign-in could not be saved in the keychain. Unlock it and retry."
-                    .into();
-        }
-        Ok::<_, String>(status)
+            let after = serde_json::to_string(&secrets)
+                .map_err(|_| "Could not save the renewed sign-in.")?;
+            if store.set(&account.uuid, &after).is_err() {
+                status.state = State::Retry;
+                status.message =
+                    "The renewed sign-in could not be saved in the keychain. Unlock it and retry."
+                        .into();
+                before
+            } else {
+                secrets
+            }
+        } else {
+            secrets
+        };
+        Ok::<_, String>((status, Some(CompletedRefresh { checked, saved })))
     })();
-    result.unwrap_or_else(|e| Status::failed(&e))
+    result.unwrap_or_else(|e| (Status::failed(&e), None))
 }
 
 /// Renew `who` for a game already running (a server refused its session, or a splitscreen

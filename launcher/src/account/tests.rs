@@ -723,6 +723,59 @@ fn the_game_plays_only_as_an_account_that_owns_it() {
 }
 
 #[test]
+fn play_reuses_a_pending_refresh_and_keeps_the_offline_fallback() {
+    let store = MemoryStore::default();
+    let stale = Secrets {
+        minecraft_expires_at: 1,
+        ..secrets("old", true)
+    };
+    let mut accounts = signed_in(&store, &stale);
+    // Microsoft rotates the refresh token, but Xbox fails before we get a Minecraft token.
+    let (mock, ep) = mock(|m| m.xerr = Some(2148916233));
+    let flight = Arc::new(Mutex::new(None));
+    let refreshes = session::Refreshes::from([(UUID.into(), flight.clone())]);
+    let pass = std::thread::scope(|scope| {
+        let mut completed = flight.lock().unwrap();
+        let play = scope.spawn(|| {
+            launch_for_game_with_refreshes(
+                &ep,
+                Some("test-client"),
+                &store,
+                &mut accounts,
+                &refreshes,
+            )
+        });
+        let (status, result) = session::refresh_and_record(
+            &ep,
+            Some("test-client"),
+            &store,
+            &notch(),
+            &nowhere(),
+            &|_| {},
+            true,
+        );
+        *completed = result;
+        drop(completed);
+
+        assert_eq!(status.state, session::State::Retry);
+        let pass = play.join().unwrap().unwrap();
+        assert_eq!(pass.offline.as_deref(), Some(status.message.as_str()));
+        pass
+    });
+
+    assert!(pass.session.is_none());
+    assert_eq!(
+        mock.lock()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|(_, path, _)| path == "/ms/token")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn files_from_launchers_with_offline_names_load_and_lose_them_on_save() {
     let dir = std::env::temp_dir().join(format!("horizon-old-offline-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

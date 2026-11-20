@@ -338,8 +338,7 @@ impl Launcher {
         }
     }
 
-    /// Starts the game: the session first (a network round trip when the token needs
-    /// renewing), then `drain` starts the process when it arrives.
+    /// Resolve the session while preparing the game files, then let `drain` start the process.
     pub(crate) fn start_client(&mut self, tag: String, instance_id: Option<String>) {
         // The folder this start reads, a pack's carried mods among it: never one being ported.
         let work = self.starting_pack.clone().or_else(|| {
@@ -363,9 +362,6 @@ impl Launcher {
         // A little earlier than the spawn: file times can be coarse.
         self.client_started =
             Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2));
-        // What the resources lack (built-in packs, panorama, sounds) and the session (a network
-        // round trip when the token needs renewing) come first; `drain` starts the game when the
-        // session arrives.
         self.starting_client = Some(tag.clone());
         self.starting_instance = instance_id.clone();
         self.play_pressed = Some(Instant::now());
@@ -382,36 +378,43 @@ impl Launcher {
         let mods_tx = self.mods.tx.clone();
         let auto_enabled = self.settings.auto_updates_mods();
         std::thread::spawn(move || {
-            // One step at a time, on stderr and in the window.
             let say = |stderr: &str, shown: &str| play_step::say(&tx, stderr, shown.into());
-            say(
-                "checking the game's assets",
-                tr("Checking the game's assets…"),
-            );
-            backend::complete_assets(&tag);
-            if let Some(auto) = auto {
-                say("updating registry mods", tr("Updating registry mods…"));
-                // The project downloading now, once per project.
-                let last = std::cell::RefCell::new(String::new());
-                let progress = |project: &str| {
-                    if *last.borrow() != project {
-                        project.clone_into(&mut last.borrow_mut());
-                        let shown =
-                            trf("Updating registry mods: {project}", &[("project", project)]);
-                        play_step::say(&tx, &format!("updating {project}"), shown);
+            let game_home = backend::game_home();
+            let session = std::thread::scope(|scope| {
+                let session = (!horizon_launcher::developer_offline::enabled(&tag))
+                    .then(|| scope.spawn(|| account::prepare_game_session(&game_home)));
+                say(
+                    "checking the game's assets",
+                    tr("Checking the game's assets…"),
+                );
+                backend::complete_assets(&tag);
+                if let Some(auto) = auto {
+                    say("updating registry mods", tr("Updating registry mods…"));
+                    // The project downloading now, once per project.
+                    let last = std::cell::RefCell::new(String::new());
+                    let progress = |project: &str| {
+                        if *last.borrow() != project {
+                            project.clone_into(&mut last.borrow_mut());
+                            let shown =
+                                trf("Updating registry mods: {project}", &[("project", project)]);
+                            play_step::say(&tx, &format!("updating {project}"), shown);
+                        }
+                    };
+                    let lines = mods_page::auto_update(&[auto], auto_enabled, &progress);
+                    if !lines.is_empty() {
+                        let _ = mods_tx.send(mods_page::Event::AutoUpdated(lines));
                     }
-                };
-                let lines = mods_page::auto_update(&[auto], auto_enabled, &progress);
-                if !lines.is_empty() {
-                    let _ = mods_tx.send(mods_page::Event::AutoUpdated(lines));
                 }
-            }
-            say("reading the sign-in", tr("Reading the sign-in…"));
-            let session = if horizon_launcher::developer_offline::enabled(&tag) {
-                Ok(None)
-            } else {
-                account::session_for_game(&backend::game_home()).map(Some)
-            };
+                session
+                    .map(|worker| {
+                        if !worker.is_finished() {
+                            say("reading the sign-in", tr("Reading the sign-in…"));
+                        }
+                        worker.join().expect("session resolver panicked")
+                    })
+                    .transpose()
+            })
+            .map(|session| session.map(|session| session.write(&game_home)));
             say("starting the game", tr("Starting the game…"));
             let _ = tx.send(Msg::Session(session));
         });
@@ -461,16 +464,19 @@ impl Launcher {
                     ));
                 };
                 progress(account::session::Phase::Keychain);
-                let store = account::store();
-                let mut status =
-                    account::session::status_with_progress(store, &account.uuid, &progress);
-                if renew_due && status.state == account::session::State::NeedsRefresh {
-                    if let Ok(renewed) =
-                        account::session::refresh_with_progress(&account.uuid, &progress)
-                    {
-                        status = renewed;
-                    }
-                }
+                let status = || {
+                    account::session::status_with_progress(
+                        account::store(),
+                        &account.uuid,
+                        &progress,
+                    )
+                };
+                let status = if renew_due {
+                    account::session::refresh_if_due_with_progress(&account.uuid, &progress)
+                        .unwrap_or_else(|_| status())
+                } else {
+                    status()
+                };
                 let _ = tx.send(Msg::AccountStatus(account.uuid, generation, status));
             });
         }

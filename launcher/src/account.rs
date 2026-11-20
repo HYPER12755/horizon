@@ -521,7 +521,7 @@ fn profile(ep: &Endpoints, token: &str) -> Result<Option<Account>, String> {
 }
 
 /// What the keychain keeps for one account.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Secrets {
     refresh_token: String,
     #[serde(default)]
@@ -579,6 +579,7 @@ impl Secrets {
 }
 
 /// What asking the Minecraft services again found for one account.
+#[derive(Clone)]
 enum Check {
     /// It owns the game: its profile as it is now (the name may have changed) and its tokens.
     Owns(Account, Secrets),
@@ -1970,6 +1971,16 @@ pub fn launch(
     store: &dyn SecretStore,
     accounts: &mut Accounts,
 ) -> Result<Launch, NoOwner> {
+    launch_with_refreshes(ep, client_id, store, accounts, &session::Refreshes::new())
+}
+
+fn launch_with_refreshes(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    store: &dyn SecretStore,
+    accounts: &mut Accounts,
+    refreshes: &session::Refreshes,
+) -> Result<Launch, NoOwner> {
     let selected = accounts.selected.clone();
     let mut order = accounts.accounts.clone();
     order.sort_by_key(|a| Some(&a.uuid) != selected.as_ref());
@@ -1981,6 +1992,10 @@ pub fn launch(
             break;
         }
         let plays = Some(&account.uuid) == selected.as_ref();
+        // Wait outside the operation lock, which the pending refresh itself needs.
+        let refreshed = refreshes
+            .get(&account.uuid)
+            .and_then(|flight| flight.lock().ok()?.clone());
         let operation = session::lock(store);
         let read = match store.get(&account.uuid) {
             Ok(text) => text.and_then(|s| serde_json::from_str::<Secrets>(&s).ok()),
@@ -2010,7 +2025,9 @@ pub fn launch(
         };
         let before = serde_json::to_string(&secrets).ok();
         let checked = match &operation {
-            Ok(_) => check(ep, client_id, &account, secrets),
+            Ok(_) => refreshed
+                .and_then(|answer| answer.for_secrets(&secrets))
+                .unwrap_or_else(|| check(ep, client_id, &account, secrets)),
             Err(e) => Check::NoAnswer(e.clone(), secrets),
         };
         let (said, secrets) = match checked {
@@ -2065,10 +2082,20 @@ pub fn launch_for_game(
     store: &dyn SecretStore,
     accounts: &mut Accounts,
 ) -> Result<Launch, NoOwner> {
+    launch_for_game_with_refreshes(ep, client_id, store, accounts, &session::Refreshes::new())
+}
+
+fn launch_for_game_with_refreshes(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    store: &dyn SecretStore,
+    accounts: &mut Accounts,
+    refreshes: &session::Refreshes,
+) -> Result<Launch, NoOwner> {
     if accounts.selected().is_none() {
         accounts.selected = accounts.accounts.first().map(|a| a.uuid.clone());
     }
-    let pass = launch(ep, client_id, store, accounts)?;
+    let pass = launch_with_refreshes(ep, client_id, store, accounts, refreshes)?;
     let owns = accounts
         .selected()
         .and_then(|a| secrets_in(store, &a.uuid))
@@ -2315,25 +2342,35 @@ pub struct GameSession {
     pub env: Vec<(&'static str, String)>,
 }
 
-/// The owner gate for the game about to start, then the selected account's session in a file
-/// for it, and the other accounts' for its splitscreen players.
-pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
+/// Resolved credentials held in memory until the game is ready to read its session files.
+pub struct PreparedGameSession {
+    pass: Launch,
+    others: Vec<SplitSession>,
+}
+
+impl PreparedGameSession {
+    pub fn write(self, game_home: &Path) -> GameSession {
+        let env = write_split_sessions(&game_home.join("sessions"), self.others);
+        session_file(game_home, self.pass, env)
+    }
+}
+
+/// Resolve the playing account and any splitscreen accounts ahead of launch.
+pub fn prepare_game_session(game_home: &Path) -> Result<PreparedGameSession, NoOwner> {
     let mut accounts = Accounts::load();
-    let pass = launch_for_game(
+    let refreshes = session::pending_refreshes();
+    let pass = launch_for_game_with_refreshes(
         &Endpoints::live(),
         client_id().as_deref(),
         store(),
         &mut accounts,
+        &refreshes,
     )?;
-    let env = split_sessions(
-        game_home,
-        &mut accounts,
-        pass.session.as_ref().map(|(a, _)| a.uuid.as_str()),
-    );
-    if let Err(e) = accounts.save_renewed() {
-        eprintln!("Horizon: the accounts are not saved: {e}");
-    }
-    Ok(session_file(game_home, pass, env))
+    Ok(prepare_session(game_home, pass, &mut accounts, &refreshes))
+}
+
+pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
+    prepare_game_session(game_home).map(|session| session.write(game_home))
 }
 
 /// [`session_for_game`] for one launch as `who` (`play --account`, a signed-in account): who
@@ -2353,15 +2390,10 @@ pub fn session_for_game_as(game_home: &Path, who: &str) -> Result<GameSession, S
         eprintln!("Horizon: the accounts are not saved: {e}");
     }
     let pass = pass?;
-    let env = split_sessions(
-        game_home,
-        &mut accounts,
-        pass.session.as_ref().map(|(a, _)| a.uuid.as_str()),
-    );
-    if let Err(e) = accounts.save_renewed() {
-        eprintln!("Horizon: the accounts are not saved: {e}");
-    }
-    Ok(session_file(game_home, pass, env))
+    Ok(
+        prepare_session(game_home, pass, &mut accounts, &session::Refreshes::new())
+            .write(game_home),
+    )
 }
 
 /// The owner gate as `who`, on `accounts`, which keeps its choice of player.
@@ -2396,26 +2428,30 @@ fn session_file(game_home: &Path, pass: Launch, env: Vec<(&'static str, String)>
     out
 }
 
-fn split_sessions(
+fn prepare_session(
     game_home: &Path,
+    pass: Launch,
     accounts: &mut Accounts,
-    playing: Option<&str>,
-) -> Vec<(&'static str, String)> {
-    if splitscreen_on(game_home) {
-        // The launch may override the saved player.
-        let selected = std::mem::replace(&mut accounts.selected, playing.map(str::to_owned));
-        let env = account_sessions(
+    refreshes: &session::Refreshes,
+) -> PreparedGameSession {
+    let others = if splitscreen_on(game_home) {
+        let playing = pass.session.as_ref().map(|(a, _)| a.uuid.as_str());
+        resolve_split_sessions(
             &Endpoints::live(),
             client_id().as_deref(),
             store(),
-            &game_home.join("sessions"),
             accounts,
-        );
-        accounts.selected = selected;
-        env
+            playing,
+            Instant::now() + OTHERS_WAIT,
+            refreshes,
+        )
     } else {
         Vec::new()
+    };
+    if let Err(e) = accounts.save_renewed() {
+        eprintln!("Horizon: the accounts are not saved: {e}");
     }
+    PreparedGameSession { pass, others }
 }
 
 /// Whether the game's Splitscreen setting is on (`horizon-extras.txt`, `splitscreen:true`): only
@@ -2435,6 +2471,7 @@ fn splitscreen_on(game_home: &Path) -> bool {
 /// offered only with a token that still holds (no request starts; one under way finishes).
 const OTHERS_WAIT: Duration = Duration::from_secs(10);
 
+#[cfg(test)]
 fn account_sessions(
     ep: &Endpoints,
     client_id: Option<&str>,
@@ -2452,6 +2489,7 @@ fn account_sessions(
     )
 }
 
+#[cfg(test)]
 fn account_sessions_until(
     ep: &Endpoints,
     client_id: Option<&str>,
@@ -2460,10 +2498,37 @@ fn account_sessions_until(
     accounts: &mut Accounts,
     deadline: Instant,
 ) -> Vec<(&'static str, String)> {
+    let playing = accounts.selected.clone();
+    let sessions = resolve_split_sessions(
+        ep,
+        client_id,
+        store,
+        accounts,
+        playing.as_deref(),
+        deadline,
+        &session::Refreshes::new(),
+    );
+    write_split_sessions(dir, sessions)
+}
+
+struct SplitSession {
+    ready: Option<(Account, Secrets)>,
+    fallback: Value,
+}
+
+fn resolve_split_sessions(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    store: &dyn SecretStore,
+    accounts: &mut Accounts,
+    playing: Option<&str>,
+    deadline: Instant,
+    refreshes: &session::Refreshes,
+) -> Vec<SplitSession> {
     let others: Vec<Account> = accounts
         .accounts
         .iter()
-        .filter(|a| Some(&a.uuid) != accounts.selected.as_ref())
+        .filter(|a| Some(a.uuid.as_str()) != playing)
         .cloned()
         .collect();
     let mut list = Vec::new();
@@ -2478,7 +2543,10 @@ fn account_sessions_until(
             Some(deadline.saturating_duration_since(Instant::now())),
         );
         let Some(secrets) = secrets_in(store, &account.uuid) else {
-            list.push(skipped("Sign in again in the launcher."));
+            list.push(SplitSession {
+                ready: None,
+                fallback: skipped("Sign in again in the launcher."),
+            });
             continue;
         };
         let fallback = skipped("Sign in again in the launcher.");
@@ -2490,12 +2558,22 @@ fn account_sessions_until(
             s.owns && !s.sign_in_required && s.minecraft_expires_at > now() + margin
         };
         let known = holds(&secrets, RENEW_BEFORE);
-        let late = operation.is_err() || Instant::now() >= deadline;
+        // A pending refresh can still be queued for the account lock. Keep the splitscreen
+        // budget and use the existing token fallback in that case.
+        let refresh = refreshes.get(&uuid).map(|flight| flight.try_lock());
+        let busy = matches!(&refresh, Some(Err(std::sync::TryLockError::WouldBlock)));
+        let refreshed = refresh
+            .and_then(Result::ok)
+            .and_then(|result| result.clone());
+        let late = busy || operation.is_err() || Instant::now() >= deadline;
         let (account, secrets) = match known {
             true => (Some(account), secrets),
             // Out of time: its token while it holds, else Sign in again.
             false if late => (holds(&secrets, 60).then_some(account), secrets),
-            false => match check(ep, client_id, &account, secrets) {
+            false => match refreshed
+                .and_then(|answer| answer.for_secrets(&secrets))
+                .unwrap_or_else(|| check(ep, client_id, &account, secrets))
+            {
                 Check::Owns(renewed, secrets) => {
                     accounts.update(renewed.clone());
                     (Some(renewed), secrets)
@@ -2515,19 +2593,31 @@ fn account_sessions_until(
             let _ = store.set(&uuid, &text);
         }
         drop(operation);
-        let Some(account) = account else {
-            list.push(if secrets.owns { fallback } else {
-                json!({ "name": fallback["name"], "uuid": uuid, "skipped": "This account needs Minecraft: Java Edition ownership confirmed in the launcher." })
-            });
-            continue;
+        let fallback = if secrets.owns {
+            fallback
+        } else {
+            json!({ "name": fallback["name"], "uuid": uuid, "skipped": "This account needs Minecraft: Java Edition ownership confirmed in the launcher." })
         };
-        match write_launch_session_file(dir, &account, &secrets) {
-            Ok(file) => {
-                list.push(json!({ "name": account.name, "uuid": account.uuid, "file": file }))
-            }
-            Err(_) => list.push(fallback),
-        }
+        list.push(SplitSession {
+            ready: account.map(|account| (account, secrets)),
+            fallback,
+        });
     }
+    list
+}
+
+fn write_split_sessions(dir: &Path, sessions: Vec<SplitSession>) -> Vec<(&'static str, String)> {
+    let list: Vec<_> = sessions
+        .into_iter()
+        .map(|session| {
+            if let Some((account, secrets)) = session.ready {
+                if let Ok(file) = write_launch_session_file(dir, &account, &secrets) {
+                    return json!({ "name": account.name, "uuid": account.uuid, "file": file });
+                }
+            }
+            session.fallback
+        })
+        .collect();
     if list.is_empty() {
         return Vec::new();
     }
