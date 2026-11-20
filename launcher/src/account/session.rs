@@ -2,7 +2,7 @@
 //! public status; credentials stay behind SecretStore and the existing session-file handoff.
 use super::*;
 use std::fs::{File, OpenOptions};
-use std::sync::{Arc, LazyLock, MutexGuard};
+use std::sync::{Arc, LazyLock, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 /// Public progress only; no account credentials or provider response bodies.
@@ -255,11 +255,118 @@ impl CompletedRefresh {
 }
 
 type RefreshFlight = Arc<Mutex<Option<CompletedRefresh>>>;
-pub(super) type Refreshes = HashMap<String, RefreshFlight>;
-static REFRESHES: LazyLock<Mutex<Refreshes>> = LazyLock::new(Mutex::default);
+type Flights = HashMap<String, RefreshFlight>;
 
-pub(super) fn pending_refreshes() -> Refreshes {
-    REFRESHES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+/// Keep flights that overlap a Play preflight, even if they finish while Play waits for
+/// the account lock. Completed credentials are dropped when the last observer is done.
+#[derive(Default)]
+pub(super) struct RefreshRegistry(Mutex<RegistryState>);
+
+#[derive(Default)]
+struct RegistryState {
+    active: Flights,
+    observers: Vec<Weak<Mutex<Flights>>>,
+}
+
+#[derive(Default)]
+pub(super) struct RefreshObserver {
+    flights: Arc<Mutex<Flights>>,
+    #[cfg(test)]
+    pub(super) before_wait: Option<std::sync::mpsc::Sender<()>>,
+}
+
+pub(super) static REFRESHES: LazyLock<RefreshRegistry> = LazyLock::new(RefreshRegistry::default);
+
+impl RefreshRegistry {
+    pub(super) fn observe(&self) -> RefreshObserver {
+        let mut registry = self.0.lock().unwrap();
+        let observer = RefreshObserver {
+            flights: Arc::new(Mutex::new(registry.active.clone())),
+            #[cfg(test)]
+            before_wait: None,
+        };
+        registry.observers.retain(|entry| entry.strong_count() > 0);
+        registry.observers.push(Arc::downgrade(&observer.flights));
+        observer
+    }
+
+    pub(super) fn run(
+        &self,
+        uuid: &str,
+        refresh: impl FnOnce() -> (Status, Option<CompletedRefresh>),
+    ) -> Status {
+        let flight = RefreshFlight::default();
+        let mut completed = flight.lock().unwrap();
+        {
+            let mut registry = self.0.lock().unwrap();
+            registry.active.insert(uuid.into(), flight.clone());
+            registry.observers.retain(|entry| {
+                let Some(observer) = entry.upgrade() else {
+                    return false;
+                };
+                observer.lock().unwrap().insert(uuid.into(), flight.clone());
+                true
+            });
+        }
+        let (status, result) = refresh();
+        *completed = result;
+        drop(completed);
+        let mut registry = self.0.lock().unwrap();
+        if registry
+            .active
+            .get(uuid)
+            .is_some_and(|f| Arc::ptr_eq(f, &flight))
+        {
+            registry.active.remove(uuid);
+        }
+        status
+    }
+}
+
+impl RefreshObserver {
+    fn flight(&self, uuid: &str) -> Option<RefreshFlight> {
+        self.flights.lock().unwrap().get(uuid).cloned()
+    }
+
+    // None means no answer. Err means the flight still needs time.
+    pub(super) fn completed(&self, uuid: &str) -> Result<Option<CompletedRefresh>, ()> {
+        let Some(flight) = self.flight(uuid) else {
+            return Ok(None);
+        };
+        try_completed(&flight)
+    }
+
+    pub(super) fn lock_for_launch<'a>(
+        &self,
+        store: &'a dyn SecretStore,
+        uuid: &str,
+    ) -> Result<(Operation<'a>, Option<CompletedRefresh>), String> {
+        loop {
+            let operation = lock(store)?;
+            let Some(flight) = self.flight(uuid) else {
+                return Ok((operation, None));
+            };
+            match try_completed(&flight) {
+                Ok(result) => return Ok((operation, result)),
+                Err(()) => {
+                    drop(operation);
+                    #[cfg(test)]
+                    if let Some(signal) = &self.before_wait {
+                        let _ = signal.send(());
+                    }
+                    drop(flight.lock());
+                }
+            }
+        }
+    }
+}
+
+fn try_completed(flight: &RefreshFlight) -> Result<Option<CompletedRefresh>, ()> {
+    match flight.try_lock() {
+        Ok(result) => Ok(result.clone()),
+        Err(std::sync::TryLockError::WouldBlock) => Err(()),
+        Err(std::sync::TryLockError::Poisoned(_)) => Ok(None),
+    }
 }
 
 fn refresh_for_launcher(
@@ -271,31 +378,17 @@ fn refresh_for_launcher(
         .find(who)
         .cloned()
         .ok_or("That account isn't signed in.")?;
-    let flight = RefreshFlight::default();
-    let mut completed = flight.lock().expect("new refresh");
-    REFRESHES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(account.uuid.clone(), flight.clone());
-    let (status, result) = refresh_and_record(
-        &Endpoints::live(),
-        client_id().as_deref(),
-        store(),
-        &account,
-        &Accounts::path(),
-        progress,
-        force,
-    );
-    *completed = result;
-    drop(completed);
-    let mut flights = REFRESHES.lock().unwrap_or_else(|e| e.into_inner());
-    if flights
-        .get(&account.uuid)
-        .is_some_and(|f| Arc::ptr_eq(f, &flight))
-    {
-        flights.remove(&account.uuid);
-    }
-    Ok(status)
+    Ok(REFRESHES.run(&account.uuid, || {
+        refresh_and_record(
+            &Endpoints::live(),
+            client_id().as_deref(),
+            store(),
+            &account,
+            &Accounts::path(),
+            progress,
+            force,
+        )
+    }))
 }
 
 #[cfg(test)]

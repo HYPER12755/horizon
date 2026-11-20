@@ -732,10 +732,39 @@ fn play_reuses_a_pending_refresh_and_keeps_the_offline_fallback() {
     let mut accounts = signed_in(&store, &stale);
     // Microsoft rotates the refresh token, but Xbox fails before we get a Minecraft token.
     let (mock, ep) = mock(|m| m.xerr = Some(2148916233));
-    let flight = Arc::new(Mutex::new(None));
-    let refreshes = session::Refreshes::from([(UUID.into(), flight.clone())]);
+    let registry = session::RefreshRegistry::default();
+    // Play is already observing when the startup refresh registers.
+    let mut refreshes = registry.observe();
+    let (waiting, play_saw_pending) = std::sync::mpsc::channel();
+    refreshes.before_wait = Some(waiting);
     let pass = std::thread::scope(|scope| {
-        let mut completed = flight.lock().unwrap();
+        let (queued, refresh_registered) = std::sync::mpsc::channel();
+        let worker = scope.spawn({
+            let (registry, ep, store) = (&registry, &ep, &store);
+            move || {
+                registry.run(UUID, || {
+                    session::refresh_and_record(
+                        ep,
+                        Some("test-client"),
+                        store,
+                        &notch(),
+                        &nowhere(),
+                        &|phase| {
+                            if phase == session::Phase::Queued {
+                                queued.send(()).unwrap();
+                                play_saw_pending
+                                    .recv_timeout(Duration::from_secs(5))
+                                    .unwrap();
+                            }
+                        },
+                        true,
+                    )
+                })
+            }
+        });
+        refresh_registered
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
         let play = scope.spawn(|| {
             launch_for_game_with_refreshes(
                 &ep,
@@ -743,20 +772,11 @@ fn play_reuses_a_pending_refresh_and_keeps_the_offline_fallback() {
                 &store,
                 &mut accounts,
                 &refreshes,
+                &mut None,
             )
         });
-        let (status, result) = session::refresh_and_record(
-            &ep,
-            Some("test-client"),
-            &store,
-            &notch(),
-            &nowhere(),
-            &|_| {},
-            true,
-        );
-        *completed = result;
-        drop(completed);
 
+        let status = worker.join().unwrap();
         assert_eq!(status.state, session::State::Retry);
         let pass = play.join().unwrap().unwrap();
         assert_eq!(pass.offline.as_deref(), Some(status.message.as_str()));
@@ -773,6 +793,140 @@ fn play_reuses_a_pending_refresh_and_keeps_the_offline_fallback() {
             .count(),
         1
     );
+}
+
+#[test]
+fn play_rechecks_sign_in_before_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("accounts.json");
+    let store = MemoryStore::default();
+    let (_, ep) = mock(|_| {});
+    let prepare = || {
+        prepare_game_session_with(
+            dir.path(),
+            &path,
+            &ep,
+            Some("test-client"),
+            &store,
+            session::RefreshObserver::default(),
+        )
+    };
+    let refused = prepare();
+    assert!(refused.pass.is_err());
+    signed_in(&store, &secrets("mc-token", true))
+        .save_to(&path)
+        .unwrap();
+    let session = refused
+        .write_with(dir.path(), &path, &store, prepare)
+        .unwrap();
+    let file = session.file.unwrap();
+    assert!(file.is_file());
+    std::fs::remove_file(file).unwrap();
+
+    let prepared = prepare();
+    Accounts::default().save_to(&path).unwrap();
+    store.delete(UUID).unwrap();
+    assert!(prepared
+        .write_with(dir.path(), &path, &store, prepare)
+        .is_err());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("sessions"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn splitscreen_handoff_skips_expired_and_signed_out_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::default();
+    let (_, ep) = mock(|_| {});
+    let refreshes = session::RefreshObserver::default();
+    let mut accounts = signed_in(&store, &secrets("mc-token", true));
+    let prepare = |accounts: &mut Accounts| {
+        resolve_split_sessions(
+            &ep,
+            Some("test-client"),
+            &store,
+            accounts,
+            None,
+            Instant::now(),
+            &refreshes,
+        )
+    };
+    let expired = prepare(&mut accounts);
+    let mut stale = secrets_in(&store, UUID).unwrap();
+    stale.minecraft_expires_at = 1;
+    store
+        .set(UUID, &serde_json::to_string(&stale).unwrap())
+        .unwrap();
+    let env = write_split_sessions(dir.path(), expired, &accounts, &store, &refreshes);
+    assert!(env[0].1.contains(r#""skipped""#));
+
+    signed_in(&store, &secrets("mc-token", true));
+    let signed_out = prepare(&mut accounts);
+    accounts.remove(&store, UUID).unwrap();
+    let env = write_split_sessions(dir.path(), signed_out, &accounts, &store, &refreshes);
+    assert!(env[0].1.contains(r#""skipped""#));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn splitscreen_handoff_uses_a_refresh_finished_during_downloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::default();
+    let (_, ep) = mock(|_| {});
+    let registry = session::RefreshRegistry::default();
+    let refreshes = registry.observe();
+    let stale = Secrets {
+        minecraft_expires_at: 1,
+        ..secrets("old", true)
+    };
+    let mut accounts = signed_in(&store, &stale);
+    let (queued, registered) = std::sync::mpsc::channel();
+    let (resume, proceed) = std::sync::mpsc::channel();
+    let sessions = std::thread::scope(|scope| {
+        let worker = scope.spawn({
+            let (registry, ep, store) = (&registry, &ep, &store);
+            move || {
+                registry.run(UUID, || {
+                    session::refresh_and_record(
+                        ep,
+                        Some("test-client"),
+                        store,
+                        &notch(),
+                        &nowhere(),
+                        &|phase| {
+                            if phase == session::Phase::Queued {
+                                queued.send(()).unwrap();
+                                proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                            }
+                        },
+                        true,
+                    )
+                })
+            }
+        });
+        registered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let sessions = resolve_split_sessions(
+            &ep,
+            Some("test-client"),
+            &store,
+            &mut accounts,
+            None,
+            Instant::now() + Duration::from_secs(5),
+            &refreshes,
+        );
+        resume.send(()).unwrap();
+        assert_eq!(worker.join().unwrap().state, session::State::Ready);
+        sessions
+    });
+    let env = write_split_sessions(dir.path(), sessions, &accounts, &store, &refreshes);
+    let list: Value = serde_json::from_str(&env[0].1).unwrap();
+    let file = list[0]["file"].as_str().unwrap();
+    let session: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    assert_ne!(session["access_token"], "old");
 }
 
 #[test]
@@ -2610,19 +2764,26 @@ fn a_launch_saving_late_keeps_sign_ins_and_outs_made_meanwhile() {
     };
     let mut before = signed_in(&store, &secrets("mc-token", true));
     before.accounts.push(other("gone", "Leaving"));
+    before.accounts.push(other("concurrent", "Before"));
+    before.accounts.push(other("untouched", "Original"));
     before.save_to(&file).unwrap();
     // The launch's copy, with Notch's new skin.
     let mut renewed = Accounts::load_from(&file);
     renewed.accounts[0].skin = Some(("https://textures.example/notch".into(), "classic".into()));
-    // Meanwhile: one account signs out, another signs in.
+    renewed.accounts[2].name = "Play's update".into();
+    // Meanwhile: one account signs out, another signs in, and two profiles are refreshed.
     let mut now = Accounts::load_from(&file);
     now.accounts.retain(|a| a.uuid != "gone");
     now.accounts.push(other("new", "Arriving"));
+    now.accounts[1].name = "Newer".into();
+    now.accounts[2].name = "Refreshed".into();
     now.save_to(&file).unwrap();
-    renewed.save_renewed_to(&store, &file).unwrap();
+    renewed.save_renewed_to(&before, &store, &file).unwrap();
     let saved = Accounts::load_from(&file);
     let uuids: Vec<&str> = saved.accounts.iter().map(|a| a.uuid.as_str()).collect();
-    assert_eq!(uuids, [UUID, "new"]);
+    assert_eq!(uuids, [UUID, "concurrent", "untouched", "new"]);
+    assert_eq!(saved.find("concurrent").unwrap().name, "Newer");
+    assert_eq!(saved.find("untouched").unwrap().name, "Refreshed");
     assert!(
         saved.find(UUID).unwrap().skin.is_some(),
         "the renewed skin is kept"

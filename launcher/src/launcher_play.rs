@@ -410,11 +410,13 @@ impl Launcher {
                         if !worker.is_finished() {
                             say("reading the sign-in", tr("Reading the sign-in…"));
                         }
-                        worker.join().expect("session resolver panicked")
+                        worker
+                            .join()
+                            .expect("session resolver panicked")
+                            .write(&game_home)
                     })
                     .transpose()
-            })
-            .map(|session| session.map(|session| session.write(&game_home)));
+            });
             say("starting the game", tr("Starting the game…"));
             let _ = tx.send(Msg::Session(session));
         });

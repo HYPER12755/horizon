@@ -2046,6 +2046,7 @@ fn download_for_owner(
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let mut accounts = account::Accounts::load();
+    let original = accounts.clone();
     // Any account that owns the game may download it (`launch`), not only the one that plays.
     let pass = account::launch(
         &account::Endpoints::live(),
@@ -2053,7 +2054,7 @@ fn download_for_owner(
         account::store(),
         &mut accounts,
     );
-    if let Err(e) = accounts.save_renewed() {
+    if let Err(e) = accounts.save_renewed(&original) {
         log(format!("Horizon: the accounts are not saved: {e}"));
     }
     download_for(pins, dir, pass, !accounts.accounts.is_empty(), fetch, log)
