@@ -8,12 +8,16 @@
 //! chat, whether the server kept it connected throughout). With `HORIZON_NET_QUIET` (lines
 //! split by `;`) it then sends them as one batch of a mod's quiet commands
 //! (`horizon_protocol::quiet`, `tools/quiet_commands_e2e.py`) and waits two
-//! seconds for any chat they bring.
+//! seconds for any chat they bring. The arrow-sound parity harness uses
+//! `HORIZON_NET_SOUND_REPORT` for raw sound packet rows and
+//! `HORIZON_NET_WAIT_CHAT` to wait for its server's completion message.
 use super::Game;
 use horizon_client::Result;
+use horizon_protocol::{buf::Writer, packets::play::Clientbound};
 use serde_json::json;
 use std::{
     path::Path,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -34,6 +38,9 @@ impl Game<'_> {
         let lines: Vec<String> = std::env::var("HORIZON_NET_CHAT")
             .map(|v| v.split(';').map(str::to_owned).collect())
             .unwrap_or_else(|_| vec!["hello from the horizon client".into(), "/list".into()]);
+        let sound_report = std::env::var_os("HORIZON_NET_SOUND_REPORT");
+        let completion_message = std::env::var("HORIZON_NET_WAIT_CHAT").ok();
+        let sound_packets = Arc::new(Mutex::new(Vec::new()));
         let mut sent = 0;
         let mut prompts = Vec::new();
         let mut chat_box = None;
@@ -80,6 +87,26 @@ impl Game<'_> {
                 {
                     chunks = count;
                     signed = self.remote.as_ref().is_some_and(|r| r.secure_chat.signed());
+                    if sound_report.is_some() {
+                        let sound_packets = sound_packets.clone();
+                        let remote = self.remote.as_ref().unwrap();
+                        remote
+                            .session
+                            .observe_play_packets(move |packet, id, body| {
+                                if matches!(packet, Clientbound::Sound(_)) {
+                                    let mut wire = Writer::new();
+                                    wire.varint(id);
+                                    wire.bytes(body);
+                                    sound_packets.lock().unwrap().push((
+                                        now.elapsed().as_millis(),
+                                        wire.data
+                                            .iter()
+                                            .map(|b| format!("{b:02x}"))
+                                            .collect::<String>(),
+                                    ));
+                                }
+                            });
+                    }
                     self.send_signed_chat_input(&lines[0]);
                     sent = 1;
                     step = 2;
@@ -119,7 +146,13 @@ impl Game<'_> {
                     step = 3;
                     break;
                 }
-                2 if answered => {
+                2 if answered
+                    && completion_message.as_ref().is_none_or(|message| {
+                        self.remote
+                            .as_ref()
+                            .is_some_and(|r| r.chat.iter().any(|(line, _)| line == message))
+                    }) =>
+                {
                     step = 3;
                     break;
                 }
@@ -137,6 +170,24 @@ impl Game<'_> {
             .unwrap_or_default();
         if self.remote.is_some() {
             self.leave_server(None)?;
+        }
+        if let Some(path) = sound_report {
+            use std::io::Write;
+            let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+            for (sequence, (timestamp_ms, payload)) in
+                sound_packets.lock().unwrap().iter().enumerate()
+            {
+                serde_json::to_writer(
+                    &mut file,
+                    &json!({
+                        "sequence": sequence,
+                        "timestamp_ms": timestamp_ms,
+                        "payload": payload,
+                    }),
+                )?;
+                writeln!(file)?;
+            }
+            file.flush()?;
         }
         std::fs::write(
             report,

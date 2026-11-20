@@ -9,7 +9,6 @@ pub(super) enum FrameDraw {
     RadialName,
     SplitSetup,
     SplitProfiles,
-    Studio([f32; 4]),
     Mods,
     Packs,
     Standard(std::sync::Arc<OptionsLayout>),
@@ -73,8 +72,6 @@ impl OptionsUi {
             shell.draw_background(s, batch, atlas, in_world, waiting);
             self.size = (w, h);
             FrameDraw::Shell(page)
-        } else if page == Page::Studio {
-            FrameDraw::Studio(self.studio.draw_background(batch, atlas, in_world))
         } else if matches!(
             page,
             Page::SplitSetup | Page::SplitProfiles | Page::Mods | Page::Packs
@@ -162,10 +159,6 @@ impl OptionsUi {
                 cursor,
                 self.pad_glyphs,
             )),
-            FrameDraw::Studio(rect) => {
-                self.studio.draw_contents(batch, atlas, cursor, rect);
-                FrameDraw::Complete
-            }
             kind @ (FrameDraw::Mods | FrameDraw::Packs) => {
                 let size = (batch.width, batch.height);
                 let blink = self.pack_focus.elapsed().as_millis() as u64;

@@ -310,13 +310,6 @@ impl Game<'_> {
     /// front of) it, pulled in where visual shapes are in the way. Returns the
     /// position, yaw and pitch to render from.
     pub(super) fn camera_view(&mut self, partial: f32) -> Option<(glam::DVec3, f32, f32)> {
-        if self.studio.flying() {
-            return Some((
-                self.studio.freecam.position,
-                self.studio.freecam.yaw,
-                self.studio.freecam.pitch,
-            ));
-        }
         // Minecraft.cameraEntity: a server's spectator camera on a mob or
         // another player.
         let (entity, descending, entity_kind) = match self.spectated_camera_snapshot() {
@@ -398,9 +391,6 @@ impl Game<'_> {
     /// `Camera.rotation()` as the quads of particles take it: the frame's camera (a
     /// bed's, a front view's, a mod's), not the player's own yaw and pitch.
     pub(super) fn particle_rotation(&self) -> glam::Quat {
-        if self.studio.flying() {
-            return self.camera_orientation();
-        }
         let (yaw, pitch) = self
             .posed_rotation
             .unwrap_or((self.view.y_rot, self.view.x_rot));
@@ -695,12 +685,6 @@ impl Game<'_> {
     /// The model's old pitch is the player's `xRotO`, which the turn moves
     /// with `xRot` (`turn_rotation`).
     pub(super) fn turn_player(&mut self, xo: f64, yo: f64) {
-        if self.studio.flying() {
-            self.studio
-                .freecam
-                .turn((xo * 0.15) as f32, (yo * 0.15) as f32);
-            return;
-        }
         let pitch_o = self.player_model.as_ref().map(|m| m.previous_head_pitch);
         let rotation = turn_rotation(self.yaw, self.pitch, pitch_o, xo, yo);
         // The held lead's old look (`LocalPlayer.getRopeHoldPosition`'s
@@ -750,7 +734,7 @@ impl Game<'_> {
     /// `LevelExtractor`'s skip of the camera entity: the player's own body
     /// is drawn unless the camera is in first person, or while it sleeps.
     pub(super) fn own_body_in_view(&self) -> bool {
-        !self.camera_type.is_first_person() || self.sleeping.is_some() || self.studio.flying()
+        !self.camera_type.is_first_person() || self.sleeping.is_some()
     }
     /// Whether the player's own model shows in the world view (its body or,
     /// while invisible, only its armour and held items).

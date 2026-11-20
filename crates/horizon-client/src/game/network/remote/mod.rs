@@ -566,9 +566,6 @@ pub(super) struct Remote {
     /// The slot the server last heard (`MultiPlayerGameMode.carriedIndex`): a cell, so `send` can
     /// send a new one first (`ensureHasSentCarriedItem`).
     carried: std::cell::Cell<Option<usize>>,
-    was_shared_flags: u8,
-    was_living_flags: u8,
-    last_recorded_pose: Option<crate::pose::Pose>,
     /// The last ClientboundPlayerAbilitiesPacket. Vanilla's LocalPlayer
     /// holds its abilities from the login on; here the player is made at
     /// the first teleport, which takes them then.
@@ -1170,9 +1167,6 @@ impl Game<'_> {
             last_input: 0,
             was_sprinting: false,
             carried: std::cell::Cell::new(None),
-            was_shared_flags: 0,
-            was_living_flags: 0,
-            last_recorded_pose: None,
             abilities: None,
             loaded_sent: false,
             heard_level: None,
@@ -1277,245 +1271,13 @@ impl Game<'_> {
         self.stats = Default::default();
         Ok(())
     }
-    /// Prepare a client session and remote state to receive packets from a studio replay.
-    pub(super) fn init_remote_for_replay(&mut self) -> Result<()> {
-        self.realm_session = false;
-        self.reset_tutorial();
-        self.perf.world_opening();
-        self.world_biomes = None;
-        self.world_biomes_base = None;
-        let root = self.options.resources.clone();
-        let builtin = builtin_registries(&root).ok_or("Resources are incomplete")?;
-        let lang = Arc::new(horizon_client::net::load_language(&root));
-        let info = self
-            .settings
-            .client_information(client_view_distance(self.settings.render_distance));
-        let auth = self.auth();
-        let name = auth.as_ref().map_or("ReplayPlayer", |a| a.name.as_str());
-        let user = auth.as_ref().map_or_else(
-            || {
-                (
-                    name.to_owned(),
-                    horizon_protocol::crypto::offline_uuid(name),
-                )
-            },
-            |a| (a.name.clone(), a.uuid),
-        );
-        self.server_packs_connect(None, user);
-        let session = Session::replay(name);
-        let player_type = super::perspective::player_type(&root);
-        let mut streaming = Streaming::new(
-            Arc::new(NoTerrain),
-            self.worker_context(),
-            self.res.threads(),
-        );
-        streaming.remote = true;
-        streaming.radius = self.settings.render_distance;
-        self.streaming = streaming;
-        self.world = Game::world_for_mods(self.res.facts().air, 0);
-        self.save = Arc::new(SaveDir::new(
-            std::env::temp_dir().join("horizon-replay-unused"),
-            horizon_client::save::LevelShape::OVERWORLD,
-        ));
-        self.inventory = vec![None; 36];
-        self.offhand = None;
-        self.armor = [None, None, None, None];
-        self.craft_grid = vec![None; 9];
-        self.craft_size = 2;
-        self.remove_local_player_body();
-        self.spawn = None;
-        self.mobs.clear();
-        self.clear_remote_objects();
-        self.clear_remote_projectiles();
-        self.creatures.projectiles.clear();
-        self.dropped.clear();
-        self.particles.clear();
-        self.pickups.clear();
-        self.orbs.clear();
-        self.falling.clear();
-        self.mining = None;
-        self.container = None;
-        self.carried = None;
-        self.using = None;
-        self.end_mod_use();
-        self.set_mode_id(0);
-        self.experience = Experience {
-            level: 0,
-            progress: 0.0,
-            total: 0,
-            score: 0,
-        };
-        self.ui.registries = Default::default();
-        self.build_registries();
-        self.ui.registries.permission = 0;
-        self.ui.chat.clear();
-        self.set_screen(Screen::Playing);
-        self.title = None;
-        self.dim = Dim::Overworld;
-        self.clear_lod();
-        self.pending_uploads.clear();
-        if let Some(r) = self.renderer.as_mut() {
-            r.clear_sections(self.world.layout());
-        }
-        self.apply_settings();
-        self.clear_waypoints();
-        self.boss_overlay.reset();
-        let chat_tree = self.chat_tree_for(None);
-        let services_keys = Arc::new(std::sync::Mutex::new(ServicesKeys::Ready(Vec::new())));
-
-        self.ui.registries.selector_tokens.clear();
-        self.remote = Some(Remote {
-            selector_metadata_supported: true,
-            professions: self.client_professions()?,
-            session,
-            brand: "horizon-studio".into(),
-            recipe_viewer: Default::default(),
-            features: ["minecraft:vanilla".to_string()].into(),
-            quiet_commands: false,
-            custom_books: false,
-            attachments: HashMap::new(),
-            far_terrain: None,
-            builtin,
-            status: "Playing Studio Replay".into(),
-            lang,
-            registries: Arc::new(Dynamic::default()),
-            tags: None,
-            enchantments: None,
-            joined: false,
-            reconfiguring: None,
-            logged_in: true,
-            logged_out: false,
-            local_entity_silent: false,
-            entity_id: 0,
-            camera: None,
-            use_item: None,
-            dimension: DimensionType::vanilla("minecraft:overworld"),
-            level: "minecraft:overworld".into(),
-            level_key: mod_api::DimensionKey::OVERWORLD,
-            level_facts: None,
-            level_environment: None,
-            facts_cache: Default::default(),
-            added_levels: Default::default(),
-            viewed: Default::default(),
-            hashed_seed: 0,
-            chunk_format: Arc::new(ChunkFormat::new(
-                &DimensionType::vanilla("minecraft:overworld"),
-                Vec::new(),
-                7,
-            )),
-            decoder: ChunkDecoder::new(),
-            view_distance: self.settings.render_distance,
-            simulation_distance: self.settings.simulation_distance,
-            sequence: 0,
-            last_teleport_sequence: -1,
-            position_sender: Default::default(),
-            last_input: 0,
-            was_sprinting: false,
-            was_shared_flags: 0,
-            was_living_flags: 0,
-            last_recorded_pose: None,
-            carried: std::cell::Cell::new(None),
-            abilities: None,
-            loaded_sent: false,
-            heard_level: None,
-            level_load: horizon_client::level_loading::LevelLoadTracker::new(0),
-            sent_info: info,
-            predictions: HashMap::new(),
-            menu: ClientMenu::default(),
-            ticked_before_player: std::collections::HashSet::new(),
-            craft_result: None,
-            menu_title: None,
-            menu_title_snapshot: None,
-            state_id: 0,
-            use_target: None,
-            menu_extra: None,
-            entities: HashMap::new(),
-            tick_fluids: Vec::new(),
-            tick_rain: Vec::new(),
-            tick_standings: Vec::new(),
-            tick_water_fx: Vec::new(),
-            passenger_vehicles: HashMap::new(),
-            lerps: HashMap::new(),
-            cart_lerps: HashMap::new(),
-            stepped: HashMap::new(),
-            head_lerps: HashMap::new(),
-            ghast_dismount: None,
-            first_passenger: false,
-            passenger_index: 0,
-            pending_items: HashMap::new(),
-            health: (20.0, 20, 5.0),
-            flash_on_set_health: false,
-            game_mode: 0,
-            chat: Vec::new(),
-            chat_received: 0,
-            chat_queue: VecDeque::new(),
-            signatures: Default::default(),
-            chat_previous: None,
-            next_chat_index: 0,
-            enforces_secure_chat: false,
-            services_keys,
-            chat_sessions: HashMap::new(),
-            chat_validators: HashMap::new(),
-            joining_narrated: None,
-            chat_tree,
-            chat_tree_received: false,
-            secure_chat: Default::default(),
-            custom_completions: Default::default(),
-            players: HashMap::new(),
-            tab_players: HashMap::new(),
-            skin_textures: HashMap::new(),
-            own_profile: OwnProfile::Idle,
-            skins: HashMap::new(),
-            skins_revision: 0,
-            published_skins: None,
-            listed: Default::default(),
-            online_mode: false,
-            levels: Vec::new(),
-            level_players: HashMap::new(),
-            level_player_names: HashMap::new(),
-            level_player_textures: HashMap::new(),
-            seen_players: std::collections::HashSet::new(),
-            glowing: Default::default(),
-            own_invisible: false,
-            own_on_fire: false,
-            own_arrows: 0,
-            own_stingers: 0,
-            own_shoulders: [None; 2],
-            profile: 0,
-            profile_name: String::new(),
-            destroying: None,
-            destroying_item: None,
-            is_destroying: false,
-            interaction_swing: [true; 2],
-            destroy_delay: 0,
-            input: Default::default(),
-            pending_keys: InputQueue::new(queued_keys::PENDING_KEYS),
-            swap_answer: [false; 2],
-            stop_mining: false,
-            placing: None,
-            flat: false,
-            death_message: None,
-            show_death_screen: true,
-            reduced_debug_info: false,
-            do_limited_crafting: false,
-            player_type,
-            synced: vec![None; CREATIVE_SYNCED],
-            decode_errors: 0,
-            clocks: HashMap::new(),
-            default_clock: None,
-            overworld_clock: None,
-            clock_game_time: 0,
-            chunk_center: (0, 0),
-            backlog: VecDeque::new(),
-            backlog_since: None,
-            server_links: Vec::new(),
-            debug_query: Default::default(),
-            transfer: None,
-        });
-        self.clock = horizon_client::clock::FixedStep::client();
-        self.adv = Default::default();
-        self.stats = Default::default();
-        Ok(())
+    /// Initialize the normal remote state while a test supplies packets directly.
+    #[cfg(test)]
+    pub(super) fn connect_remote_fixture(&mut self) -> horizon_protocol::connection::Pipe {
+        let (client, peer) = horizon_protocol::connection::Pipe::pair();
+        self.connect_remote_session("local", "Tester", Some(client), None, false, false)
+            .unwrap();
+        peer
     }
 
     /// Disconnect and return to the multiplayer screen (DisconnectedScreen), whose Back
@@ -2445,9 +2207,6 @@ impl Game<'_> {
     /// view centre, `calculateStorageRange` (the server's radius, at least
     /// two, plus three) chunks each way.
     pub(super) fn remote_chunk_in_range(&self, x: i32, z: i32) -> bool {
-        if self.replay.playing() {
-            return true;
-        }
         self.remote
             .as_ref()
             .is_none_or(|r| in_storage_range(r.view_distance, r.chunk_center, x, z))
@@ -6062,9 +5821,7 @@ impl Game<'_> {
             }
         }
         entity_section_steps::player_teleport(self, had_player, current, position);
-        if !self.replay.playing() {
-            self.previous_position = position;
-        }
+        self.previous_position = position;
         self.yaw = yaw;
         self.pitch = pitch;
         // setValuesFromPositionPacket: setOldPosAndRot gives xRotO the same
@@ -6372,7 +6129,7 @@ impl Game<'_> {
             return Ok(());
         };
         player.fluids.boat = boat;
-        if !riding && !self.replay.playing() {
+        if !riding {
             self.previous_position = player.position;
         }
         let before = (
@@ -6573,9 +6330,7 @@ impl Game<'_> {
             self.snap_player_model_pitch();
         }
         // The player's own model (third person, the inventory's preview).
-        if !self.replay.playing() {
-            self.tick_player_model();
-        }
+        self.tick_player_model();
         self.client_hooks_tick();
         if !dead {
             self.remote_tick_using();
@@ -7515,7 +7270,6 @@ impl Game<'_> {
                 }));
             }
         };
-        let mut moved_or_rotated = false;
         if riding {
             // LocalPlayer.sendChanges: a passenger sends its look, then the
             // vehicle it controls and, only then, its sprint.
@@ -7528,7 +7282,6 @@ impl Game<'_> {
                 out.extend(vehicle);
                 sprint(r, &mut out);
             }
-            moved_or_rotated = true;
         } else {
             sprint(r, &mut out);
             // LocalPlayer.sendPosition: no move while the view is another
@@ -7539,62 +7292,6 @@ impl Game<'_> {
                         .update(pos, (yaw, pitch), on_ground, collision)
             {
                 out.push(packet);
-                moved_or_rotated = true;
-            }
-        }
-        if moved_or_rotated && r.session.is_recording() {
-            let pkt = horizon_protocol::packets::play::Clientbound::PlayerPosition(
-                horizon_protocol::packets::play::PlayerPosition {
-                    teleport: 0,
-                    position: pos,
-                    delta: [0.0, 0.0, 0.0],
-                    yaw,
-                    pitch,
-                    relatives: 0,
-                },
-            );
-            r.session.record_clientbound(&pkt);
-        }
-        if r.session.is_recording() {
-            let is_using = self.using.is_some();
-            let living_flags: u8 = if is_using {
-                1 | if self.hand == Hand::Off { 2 } else { 0 }
-            } else {
-                0
-            };
-            let crouching = p.local_crouching || matches!(p.pose, crate::pose::Pose::Crouching);
-            let mut shared: u8 = 0;
-            if crouching {
-                shared |= 0x02;
-            }
-            if sprinting {
-                shared |= 0x08;
-            }
-            if p.swimming {
-                shared |= 0x10;
-            }
-            if p.fall_flying {
-                shared |= 0x80;
-            }
-            if shared != r.was_shared_flags
-                || living_flags != r.was_living_flags
-                || r.last_recorded_pose != Some(p.pose)
-            {
-                r.was_shared_flags = shared;
-                r.was_living_flags = living_flags;
-                r.last_recorded_pose = Some(p.pose);
-                use horizon_protocol::entity_data::{Value, serializer};
-                let pkt = horizon_protocol::packets::play::Clientbound::SetEntityData(
-                    horizon_protocol::packets::play::SetEntityData {
-                        id: r.entity_id,
-                        values: vec![
-                            (0, serializer::BYTE, Value::Byte(shared as i8)),
-                            (6, serializer::POSE, Value::Id(p.pose.id())),
-                            (8, serializer::BYTE, Value::Byte(living_flags as i8)),
-                        ],
-                    },
-                );
-                r.session.record_clientbound(&pkt);
             }
         }
         // Creative inventory edits are sent slot by slot (SetCreativeModeSlot).
@@ -9000,9 +8697,6 @@ impl Game<'_> {
             return;
         }
         if let Some(command) = message.strip_prefix('/') {
-            if self.studio_command(command) {
-                return;
-            }
             self.send_command(command);
         } else {
             self.send_signed_chat(message);
@@ -9656,11 +9350,9 @@ impl Game<'_> {
     /// A connection's screen is over the world: connecting, reconfiguring, or
     /// the level loading screen, a portal's included (`remote_overlay`).
     pub(super) fn remote_screen_up(&self) -> bool {
-        !self.replay.playing()
-            && self
-                .remote
-                .as_ref()
-                .is_some_and(|r| self.player.is_none() || r.level_load.is_active())
+        self.remote
+            .as_ref()
+            .is_some_and(|r| self.player.is_none() || r.level_load.is_active())
     }
     /// Connecting / loading screens; true when it covered the frame.
     pub(super) fn remote_overlay(&mut self, batch: &mut HudBatch) -> bool {
@@ -9750,9 +9442,6 @@ impl Game<'_> {
     /// Connected or connecting with no player yet: `ConnectScreen`, then
     /// `LevelLoadingScreen`, over the panorama with its blur.
     pub(super) fn remote_loading(&self) -> bool {
-        if self.replay.playing() {
-            return false;
-        }
         use horizon_client::level_loading::Reason;
         self.remote.as_ref().is_some_and(|r| {
             if r.level_load.is_active() {
@@ -13933,7 +13622,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        game.init_remote_for_replay().unwrap();
+        let _peer = game.connect_remote_fixture();
         game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
         let me = game.remote.as_ref().unwrap().entity_id;
         let speed = game.remote_effect_network_id("speed").unwrap();
@@ -14358,7 +14047,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        game.init_remote_for_replay().unwrap();
+        let _peer = game.connect_remote_fixture();
         // The last server's column at the origin: its extra biome came after
         // the built-in ones, one past the table the next server leaves.
         let stale = world_biomes!(game).list.len() as u16;

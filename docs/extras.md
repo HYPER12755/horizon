@@ -55,7 +55,7 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
   time of day and effects. The brightness slider keeps its normal range.
 - Held off on another's server (#3823): a multiplayer server or another player's LAN world draws the normal
   lightmap and the graphics screen hides the row, while the saved choice stays for the next world. Single
-  player, a LAN host, a splitscreen seat in P1's world and Replay Studio keep it (`fullbright_held`,
+  player, a LAN host and a splitscreen seat in P1's world keep it (`fullbright_held`,
   `game/options.rs`).
 
 ### Dynamic lights (`dynamicLights`, default off)

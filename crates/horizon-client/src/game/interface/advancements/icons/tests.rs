@@ -103,7 +103,7 @@ fn advancement_icons_reach_local_and_remote_ui_surfaces() {
                 game.award_definition(a);
             }
         } else {
-            game.init_remote_for_replay().unwrap();
+            let _peer = game.connect_remote_fixture();
             let mut sync = SyncData::empty();
             sync.builtin = (*game.remote.as_ref().unwrap().builtin).clone();
             sync.advancements = ServerAdvancements::load(

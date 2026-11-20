@@ -10,7 +10,7 @@ use horizon_client::{
         Chat, ChatAbilities, ChatAction, ChatScreen, ChatSource, ChatVisibility, Commands,
         QUEUE_EXPAND_ID, SYSTEM_INDICATOR, normalize_chat_message,
     },
-    command::{ArgType, Dispatcher, MOD_COMMAND, Registries},
+    command::Registries,
     gamerules::GameRules,
     hud::HudBatch,
     screen_draw::Measure,
@@ -54,7 +54,8 @@ use winit::{
 /// `base` with extra client-local commands added: each a literal taking the
 /// rest of the line as typed (`Dispatcher::with_mod_commands`), so the chat
 /// box colours and completes them as it does the game's own.
-pub(super) fn with_native_commands(
+#[cfg(test)]
+fn with_native_commands(
     base: &horizon_client::command::Dispatcher,
     names: &[&str],
 ) -> horizon_client::command::Dispatcher {
@@ -65,91 +66,6 @@ pub(super) fn with_native_commands(
             .copied()
             .filter(|name| base.find(name).is_none()),
     )
-}
-
-/// Add Studio's local command grammar to the suggestion tree. Commands are
-/// still dispatched by `studio_command`; this tree supplies coloring,
-/// completion, and Tab acceptance in chat.
-fn with_studio_commands(base: &Dispatcher) -> Dispatcher {
-    fn literal(d: &mut Dispatcher, parent: usize, name: &str) -> usize {
-        let node = d.literal(parent, name);
-        d.executes(node, MOD_COMMAND);
-        node
-    }
-    fn argument(d: &mut Dispatcher, parent: usize, name: &str, ty: ArgType) -> usize {
-        let node = d.argument(parent, name, ty);
-        d.executes(node, MOD_COMMAND);
-        node
-    }
-
-    let mut d = base.clone();
-    let root = d.find("studio").unwrap_or_else(|| d.literal(0, "studio"));
-    d.executes(root, MOD_COMMAND);
-
-    let record = literal(&mut d, root, "record");
-    let start = literal(&mut d, record, "start");
-    argument(&mut d, start, "name", ArgType::Word);
-    literal(&mut d, record, "stop");
-    literal(&mut d, record, "status");
-
-    let replay = literal(&mut d, root, "replay");
-    let open = literal(&mut d, replay, "open");
-    argument(&mut d, open, "path", ArgType::Greedy);
-    literal(&mut d, replay, "pause");
-    literal(&mut d, replay, "resume");
-    let speed = literal(&mut d, replay, "speed");
-    argument(
-        &mut d,
-        speed,
-        "multiplier",
-        ArgType::Double {
-            min: 0.01,
-            max: 20.0,
-        },
-    );
-    let seek = literal(&mut d, replay, "seek");
-    argument(
-        &mut d,
-        seek,
-        "milliseconds",
-        ArgType::Integer {
-            min: 0,
-            max: i32::MAX,
-        },
-    );
-    literal(&mut d, replay, "status");
-    literal(&mut d, replay, "close");
-
-    let freecam = literal(&mut d, root, "freecam");
-    argument(
-        &mut d,
-        freecam,
-        "state",
-        ArgType::StrEnum(&["on", "off"], "argument.enum.invalid"),
-    );
-
-    let keyframe = literal(&mut d, root, "keyframe");
-    literal(&mut d, keyframe, "add");
-    let remove = literal(&mut d, keyframe, "remove");
-    argument(
-        &mut d,
-        remove,
-        "index",
-        ArgType::Integer {
-            min: 0,
-            max: i32::MAX,
-        },
-    );
-    literal(&mut d, keyframe, "clear");
-
-    let path = literal(&mut d, root, "path");
-    argument(
-        &mut d,
-        path,
-        "state",
-        ArgType::StrEnum(&["lock", "unlock"], "argument.enum.invalid"),
-    );
-    d
 }
 
 impl Game<'_> {
@@ -193,7 +109,7 @@ impl Game<'_> {
             horizon_client::command::MOD_COMMAND,
             &arguments,
         );
-        with_studio_commands(&with_native_commands(&tree_with_mods, &["studio"])).with_profiler()
+        tree_with_mods.with_profiler()
     }
 }
 
@@ -2727,23 +2643,6 @@ mod tests {
         assert_eq!(problems.len(), 1);
     }
 
-    #[test]
-    #[ignore = "daily"]
-    fn studio_is_in_the_client_chat_tree_without_a_mod_registering_it() {
-        super::super::native_entity_refs::tests::with_game(|game| {
-            let tree = game.chat_tree_for(None);
-            let reg = Registries::default();
-            assert!(tree.find("studio").is_some());
-            assert_eq!(
-                tree.parse("studio start", &reg).executable().unwrap().1,
-                horizon_client::command::MOD_COMMAND
-            );
-            let parse = tree.parse("stu", &reg);
-            let offered = tree.client_suggestions(&parse, 3, &reg).1;
-            assert!(offered.iter().any(|s| s.text == "studio"));
-        });
-    }
-
     /// A native mod's command is in the tree the chat box uses (arismoko/horizon#456): known
     /// rather than red, and offered as it types. With no mod claiming one the
     /// tree is the game's own, as it was before the mods were asked.
@@ -2778,43 +2677,6 @@ mod tests {
             vanilla.parse("help", &reg).executable().map(|e| e.1)
         );
         assert_eq!(shared.nodes.len(), vanilla.nodes.len());
-    }
-
-    #[test]
-    fn studio_command_tree_suggests_subcommands_and_arguments() {
-        let reg = Registries::default();
-        let base = horizon_client::command::vanilla::game_dispatcher();
-        let tree = with_studio_commands(base);
-        let suggestions = |input: &str| {
-            let parse = tree.parse(input, &reg);
-            tree.client_suggestions(&parse, input.len(), &reg)
-                .1
-                .into_iter()
-                .map(|suggestion| suggestion.text)
-                .collect::<Vec<_>>()
-        };
-
-        assert_eq!(
-            suggestions("studio "),
-            ["freecam", "keyframe", "path", "record", "replay"]
-        );
-        assert_eq!(suggestions("studio record "), ["start", "status", "stop"]);
-        assert_eq!(
-            suggestions("studio replay "),
-            [
-                "close", "open", "pause", "resume", "seek", "speed", "status"
-            ]
-        );
-        assert_eq!(suggestions("studio freecam "), ["off", "on"]);
-        assert_eq!(suggestions("studio keyframe "), ["add", "clear", "remove"]);
-        assert_eq!(suggestions("studio path "), ["lock", "unlock"]);
-        assert_eq!(
-            tree.parse("studio replay open some-recording.mcpr", &reg)
-                .executable()
-                .unwrap()
-                .1,
-            MOD_COMMAND
-        );
     }
 
     /// When `entity_types` is empty (no `entity-types.json`), fallback includes

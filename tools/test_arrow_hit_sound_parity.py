@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real block-hit arrow category, captured by the unchanged headless client's Studio recorder.
+"""Real block-hit arrow category, observed on the headless client's play connection.
 
 The contract is admission, air-to-ground, one arrow hit on NEUTRAL, and two
 independent RECORDS controls. Full packets (including random pitch/seed and
@@ -14,7 +14,6 @@ import struct
 import subprocess
 import time
 import uuid
-import zipfile
 
 try:
     from . import lab, oracle_harness, test_rust_parity as base
@@ -26,34 +25,6 @@ except ImportError:
     from test_dedicated_server_parity import Server, free_port, game_time
 
 UUID = '0000014b-0000-0000-0000-000000000001'
-
-
-def recorded_sounds(folder):
-    archives = list((folder / 'recordings').glob('*.mcpr'))
-    assert len(archives) == 1, archives
-    with zipfile.ZipFile(archives[0]) as archive:
-        assert archive.testzip() is None
-        data = archive.read('recording.tmcpr')
-        json.loads(archive.read('metaData.json'))
-    rows, at, previous = [], 0, -1
-    while at < len(data):
-        assert len(data)-at >= 8, 'truncated Studio header'
-        stamp, length = struct.unpack_from('>ii', data, at)
-        at += 8
-        assert stamp >= previous and 0 < length <= len(data)-at, 'incomplete/out-of-order recording'
-        previous = stamp
-        payload = data[at:at+length]
-        at += length
-        rows.append(dict(sequence=len(rows), timestamp_ms=stamp, payload=payload.hex()))
-    assert rows, 'empty recording'
-    (folder / 'packets.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
-    # 119 is ClientboundSoundPacket in pinned protocol 777. Decode and reencode
-    # with the existing official codec below; no handwritten sound decoder.
-    sounds = [r for r in rows if bytes.fromhex(r['payload'])[0] == 119]
-    assert sounds, 'no sound packets'
-    path = folder / 'sound-inputs.jsonl'
-    path.write_text(''.join(json.dumps(r)+'\n' for r in sounds))
-    return path
 
 
 def run_side(label, command, client, folder, decoder):
@@ -100,11 +71,11 @@ def run_side(label, command, client, folder, decoder):
         reply('fill 0 200 0 15 205 15 minecraft:air')
         passed('execute if block 4 199 4 minecraft:stone')
         passed('execute if block 4 201 4 minecraft:air')
-        # The final silent command keeps the existing net harness connected
-        # while the console runs this bounded scene. It then stops Studio.
+        inputs = folder / 'sound-inputs.jsonl'
         env = lab.game_env(HORIZON_NET_REPORT=folder / 'client-report.json',
-            HORIZON_NET_CHAT='/studio record start h331;h331_capture_ready;'
-            '/scoreboard players set #hold h331 0;/studio record stop')
+            HORIZON_NET_CHAT='h331_capture_ready',
+            HORIZON_NET_SOUND_REPORT=inputs,
+            HORIZON_NET_WAIT_CHAT='h331_capture_done')
         with (folder / 'client.log').open('w') as log:
             process = subprocess.Popen([str(client), '--resources', str(lab.RESOURCES.resolve()),
                 '--server', f'127.0.0.1:{port}', '--name', 'Tester', '--render-distance', '2'],
@@ -134,11 +105,11 @@ def run_side(label, command, client, folder, decoder):
                 'nbt={UUID:[I;331,0,0,1],inGround:1b,item:{id:"minecraft:arrow",count:1}}]')
             reply(f'data get entity {UUID}')
             reply(control)
+            reply('tellraw Tester {"text":"h331_capture_done"}')
             process.wait(timeout=180)
             assert process.returncode == 0
         report = json.loads((folder / 'client-report.json').read_text())
         assert report.get('error') is None, report
-        inputs = recorded_sounds(folder)
         subprocess.run([*decoder, 'decode-recorded', inputs, folder / 'sounds.jsonl'], check=True)
         sounds = [json.loads(line) for line in (folder / 'sounds.jsonl').read_text().splitlines()]
         events = [s['event'] for s in sounds]
@@ -162,7 +133,7 @@ def run_side(label, command, client, folder, decoder):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, help='prebuilt server; otherwise build fast')
-    parser.add_argument('--client-binary', type=Path, help='unchanged Studio client; defaults to server binary')
+    parser.add_argument('--client-binary', type=Path, help='headless capture client; defaults to server binary')
     parser.add_argument('--out', type=Path, help='fresh capture directory; default retains a new run')
     parser.add_argument('--reference-dir', type=Path, help='retained fresh Java capture; never rewritten')
     parser.add_argument('--reference-only', action='store_true')

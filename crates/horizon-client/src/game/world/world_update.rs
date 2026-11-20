@@ -148,9 +148,6 @@ impl Game<'_> {
         if let Err(e) = horizon_client::spans::time("poll_remote", || self.poll_remote()) {
             log::warn!("Horizon: {e}");
         }
-        if let Err(e) = self.advance_studio_replay() {
-            log::warn!("Horizon Studio replay: {e}");
-        }
         // The renderer laid translucent quads out again (a shader pack's flat terrain came
         // or went), or its pages couldn't take the quads' looks it turned on, and dropped every
         // section and far tile: meshed again, as for a new one, with the looks it takes now

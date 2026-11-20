@@ -128,14 +128,6 @@ struct Mouse { ignore_first: bool }
 impl Mouse { fn set_ignore_first_move(&mut self) { self.ignore_first = true; } }
 struct Remote;
 #[derive(Default)]
-struct StudioFreecam { active: bool }
-#[derive(Default)]
-struct Studio { freecam: StudioFreecam, rmb_down: bool }
-impl Studio { fn flying(&self) -> bool { self.freecam.active } }
-#[derive(Default)]
-struct Replay { driver: Option<()> }
-impl Replay { fn playing(&self) -> bool { self.driver.is_some() } }
-#[derive(Default)]
 struct Options { offscreen: bool }
 #[derive(Default)]
 struct ServerPacks { prompt: Option<()> }
@@ -144,7 +136,6 @@ struct Game {
     keyboard_mouse: bool, split_window: bool, view_at: [u32; 2],
     captured: bool, capture_mode: Option<CursorGrabMode>, regrab_on_refocus: bool, title: Option<()>, screen: Screen,
     remote: Option<Remote>,
-    studio: Studio, replay: Replay,
     mining: bool, lan_acting: Option<u32>, renderer: Option<Renderer>, cursor: (f32, f32),
     server_packs: ServerPacks, command_prompt: Option<()>, options: Options, settings: Settings,
     unclaimed_window: bool, scripted: bool, focus_after_run: Option<bool>, applied_focus: Vec<bool>,
@@ -156,7 +147,7 @@ impl Default for Game {
             window: Some(Window { focus: Cell::new(true), ..Window::default() }),
             keyboard_mouse: true, split_window: false, view_at: [0, 0],
             mouse: Mouse::default(), captured: false, capture_mode: None, regrab_on_refocus: false, title: None,
-            screen: Screen::Playing, remote: None, studio: Studio::default(), replay: Replay::default(),
+            screen: Screen::Playing, remote: None,
             mining: false, lan_acting: None,
             renderer: None, cursor: (0.0, 0.0), server_packs: ServerPacks::default(),
             command_prompt: None, options: Options::default(), settings: Settings,
@@ -167,7 +158,6 @@ impl Default for Game {
 HELPER
 impl Game {
     fn stop_mining(&mut self) { self.mining = false; }
-    fn studio_up(&self) -> bool { self.replay.playing() || self.studio.flying() }
     fn reset_inventory_clicks(&mut self) {}
     fn restore_held_keys(&mut self) {}
     fn dialog_open(&self) -> bool { false }
@@ -341,22 +331,6 @@ fn main() {
         game.server_packs.prompt = Some(());
         game.regrab_on_refocus();
         assert!(!game.captured);
-    }
-    // Studio replays keep the pointer released after focus returns; camera look
-    // only captures it while the right mouse button is held.
-    {
-        let mut game = Game::default();
-        game.replay.driver = Some(());
-        game.studio.rmb_down = true;
-        game.capture(true);
-        assert!(game.captured);
-        game.regrab_on_refocus = true;
-        game.focused = false;
-        game.capture(false);
-        game.focused = true;
-        game.regrab_on_refocus();
-        assert!(!game.captured);
-        assert!(!game.studio.rmb_down);
     }
     // A controller-only player's screens leave the shared native pointer alone.
     {

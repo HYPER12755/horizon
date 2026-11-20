@@ -1528,8 +1528,6 @@ pub enum Page {
     /// Horizon Settings: every page Horizon adds, as a mod's settings
     /// screen hangs off vanilla's Options.
     Horizon,
-    /// Replay Studio: saved recordings browser and 3D video editor launcher.
-    Studio,
     /// AI Agent: agent control on or off, whether an agent is connected, the connection details.
     Agent,
     /// SkinCustomizationScreen: the skin layers and Main Hand.
@@ -1747,10 +1745,6 @@ pub enum Event {
     ListMusicTracks,
     /// A Music page row: play this track of this event now.
     PlayMusicTrack(String, String),
-    /// Open the recordings folder in the system file browser.
-    OpenStudioFolder,
-    /// Start playback from the selected Studio recording.
-    OpenStudioReplay(std::path::PathBuf),
 }
 /// A row of the Music page: the track, and the pool it is played from.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1861,7 +1855,6 @@ pub struct OptionsUi {
     /// The window as calibration found it before making it fullscreen (the game keeps it).
     pub calibration_window: Option<crate::hdr_calibration::WindowState>,
     pub split_setup: crate::split_ui::SplitUi,
-    pub studio: crate::studio_ui::StudioUi,
     /// The AI Agent page's status lines (set by the game while it shows).
     pub agent_status: Vec<String>,
     /// A repro recording is running: the AI Agent page's button says stop.
@@ -1958,7 +1951,6 @@ impl Default for OptionsUi {
             calibration: None,
             calibration_window: None,
             split_setup: Default::default(),
-            studio: Default::default(),
             agent_status: Vec::new(),
             agent_recording: false,
             music_groups: Vec::new(),
@@ -2448,9 +2440,6 @@ impl OptionsUi {
         if page == Page::SplitProfiles {
             self.split_profiles.reset();
         }
-        if page == Page::Studio {
-            self.studio.refresh();
-        }
     }
     /// A controller's or the keyboard's focus landed on `rect`: a row of a shell screen's list
     /// that is partly hidden scrolls all into view. How far it moved down, when it moved.
@@ -2505,7 +2494,6 @@ impl OptionsUi {
             Page::Pvp => "horizon.pages.pvp",
             Page::Credits => "credits_and_attribution.screen.title",
             Page::Horizon => "horizon.pages.settings",
-            Page::Studio => "horizon.pages.studio",
             Page::Agent => "horizon.pages.agent",
             Page::SplitProfiles => "horizon.pages.split_profiles",
             Page::SplitSetup => "horizon.pages.split_setup",
@@ -3197,25 +3185,6 @@ impl OptionsUi {
                 }
             };
         }
-        if self.page() == Page::Studio {
-            if right || drag {
-                return Vec::new();
-            }
-            use crate::studio_ui::StudioAction;
-            return match self.studio.click((x, y), size) {
-                StudioAction::None => Vec::new(),
-                StudioAction::Refresh => vec![Event::ButtonClick],
-                StudioAction::OpenReplay(path) => {
-                    vec![Event::ButtonClick, Event::OpenStudioReplay(path)]
-                }
-                StudioAction::OpenFolder => vec![Event::ButtonClick, Event::OpenStudioFolder],
-                StudioAction::Back => {
-                    let mut events = vec![Event::ButtonClick];
-                    events.extend(self.back(s));
-                    events
-                }
-            };
-        }
         if self.page() == Page::HdrCalibration
             && let Some(c) = &mut self.calibration
         {
@@ -3677,10 +3646,6 @@ impl OptionsUi {
             let outputs = shell.wheel(s, size, cursor, amount);
             return self.shell_events(s, outputs);
         }
-        if self.page() == Page::Studio {
-            self.studio.wheel(amount);
-            return Vec::new();
-        }
         let plain = self.resource_error.is_none()
             && !(self.pack_screen.is_some() && self.stack.last() == Some(&Page::Packs))
             && self.stack.last() != Some(&Page::Mods);
@@ -3761,10 +3726,6 @@ impl OptionsUi {
         }
         if let Some(shell) = self.shell_mut() {
             shell.scroll(s, size, amount);
-            return;
-        }
-        if self.page() == Page::Studio {
-            self.studio.wheel(amount);
             return;
         }
         if self.page() == Page::Mods {
@@ -5746,7 +5707,6 @@ mod tests {
             Page::Packs,
             Page::SplitSetup,
             Page::SplitProfiles,
-            Page::Studio,
         ] {
             let mut ui = OptionsUi::default();
             ui.show(page);
@@ -6715,8 +6675,6 @@ mod tests {
         assert_eq!(ui.page(), Page::PadBinds);
     }
 
-    /// Every way a pad or a wheel scrolls a page on the shell moves the same list: Replay Studio's
-    /// took the wheel and missed `scroll_at`, so a stick couldn't scroll it.
     #[test]
     fn the_wheel_and_the_stick_scroll_a_page_on_the_shell_alike() {
         let mut s = Settings::default();
@@ -7864,7 +7822,6 @@ mod tests {
                 Page::Extras,
                 Page::Pvp,
                 Page::SplitSetup,
-                Page::Studio,
                 Page::Agent,
                 Page::ModBrowser,
             ]

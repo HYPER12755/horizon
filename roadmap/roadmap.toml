@@ -738,19 +738,6 @@ asked for too; exclusive fullscreen where the backend supports it."""
 links = ["docs/graphics.md"]
 
 [[item]]
-id = "video-studio"
-title = "A complete video studio inside the game"
-status = "later"
-area = "extras"
-plain = """Record, replay and edit videos without leaving the game: record in a keypress, replay a session, cut and \
-finish the video. One of Horizon's original goals."""
-dev = """Three stages. Recording: capture gameplay in a keypress with an encoder thread and little frame-time cost. \
-Replay: a replay mode for recorded sessions. Editing: cuts, camera paths, titles and export. None of it \
-exists yet; the agent-control socket (docs/agent-control.md) already lets tools drive the game for scripted \
-shots."""
-links = ["docs/agent-control.md", "#10025"]
-
-[[item]]
 id = "controllers"
 title = "Controllers: tested on real pads, and in the launcher"
 status = "later"

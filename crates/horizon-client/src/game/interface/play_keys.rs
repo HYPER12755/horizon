@@ -10,10 +10,6 @@ impl Game<'_> {
     /// the container's hotbar keys are now (`checkHotbarKeyPressed`).
     pub(super) fn key_pressed(&mut self, key: KeyCode, raw: KeyCode) -> Result<()> {
         self.direct_craft_stop();
-        if self.screen == Screen::Playing && self.replay.playing() {
-            self.studio_key(key);
-            return Ok(());
-        }
         // `CreativeModeInventoryScreen.keyPressed` clears `ignoreTextInput` on
         // every key, before it decides anything.
         self.creative_ignore_text = false;
@@ -46,10 +42,6 @@ impl Game<'_> {
                 Screen::EmoteWheel => self.close_emote_wheel(None),
                 Screen::Options => self.options_key(KeyCode::Escape, None)?,
                 Screen::Playing => {
-                    if self.replay.playing() && self.captured {
-                        self.capture(false);
-                        return Ok(());
-                    }
                     self.pause_focus = None;
                     self.set_screen(Screen::Paused);
                     self.pause_menu = true;
@@ -95,7 +87,6 @@ impl Game<'_> {
                 Screen::Win => self.close_win_screen()?,
                 Screen::DebugOptions => self.close_debug_options(),
                 Screen::Mod => self.close_mod_screen(),
-                Screen::Studio => self.close_studio_screen(),
                 Screen::HudEditor => self.close_hud_editor(),
             },
             // `checkHotbarKeyPressed`: the keys the controls bind to the off
@@ -195,9 +186,7 @@ impl Game<'_> {
             // key.toggleGui is a KeyMapping: it clicks only with no screen open.
             KeyCode::F1 if self.screen == Screen::Playing => self.toggle_hide_gui(),
             KeyCode::F11 => self.toggle_fullscreen(),
-            KeyCode::F5 if self.screen == Screen::Playing && !self.replay.playing() => {
-                self.cycle_camera()
-            }
+            KeyCode::F5 if self.screen == Screen::Playing => self.cycle_camera(),
             KeyCode::KeyE
                 if self.screen == Screen::Creative && self.creative_screen.tab().search => {}
             KeyCode::KeyE => match self.screen {

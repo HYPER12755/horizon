@@ -430,15 +430,15 @@ fn integrated_memory_delivers_registered_raw_payload_and_reply() {
                 "production integrated server handle"
             );
             let wire_timeline = timeline.clone();
-            game.remote.as_ref().unwrap().session.start_recording(
-                WireReceipt {
+            game.remote.as_ref().unwrap().session.observe_play_packets({
+                let receipt = WireReceipt {
                     channel: CHANNEL,
                     expected: expected.clone(),
                     hits: wire_hits.clone(),
                     observed: Some(Arc::new(move || wire_timeline.mark(5))),
-                },
-                |_| {},
-            );
+                };
+                move |packet, id, body| receipt.received(packet, id, body)
+            });
             let deadline = Instant::now() + WAIT_BUDGET;
             timeline.mark(2);
             sampler.start();
@@ -529,11 +529,8 @@ pub(super) struct WireReceipt {
     pub(super) hits: Arc<AtomicUsize>,
     pub(super) observed: Option<Arc<dyn Fn() + Send + Sync>>,
 }
-impl horizon_client::net::PacketRecorder for WireReceipt {
-    fn is_active(&self) -> bool {
-        true
-    }
-    fn received(
+impl WireReceipt {
+    pub(super) fn received(
         &self,
         packet: &horizon_protocol::packets::play::Clientbound,
         id: i32,
@@ -548,19 +545,5 @@ impl horizon_client::net::PacketRecorder for WireReceipt {
                 observed();
             }
         }
-    }
-    fn record_packet(&self, _: i32, _: &[u8]) {}
-    fn status(&self) -> horizon_client::net::RecorderStatus {
-        horizon_client::net::RecorderStatus {
-            active: true,
-            path: Default::default(),
-            elapsed: Duration::ZERO,
-            packet_count: self.hits.load(Ordering::SeqCst) as u64,
-            bytes_written: 0,
-            error: None,
-        }
-    }
-    fn stop(self: Box<Self>) -> std::io::Result<std::path::PathBuf> {
-        Ok(Default::default())
     }
 }

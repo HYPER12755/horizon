@@ -75,7 +75,6 @@ pub(super) fn tooltip(page: usize, r: usize) -> Option<Text> {
 pub(super) fn horizon_page_tooltip(page: Page) -> Option<&'static str> {
     Some(match page {
         Page::Horizon => "horizon.pages.settings.tooltip",
-        Page::Studio => "horizon.pages.studio.tooltip",
         Page::Graphics => "horizon.pages.graphics.tooltip",
         Page::GraphicsAdvanced => "horizon.pages.graphics_advanced.tooltip",
         Page::Controller => "horizon.pages.controller.tooltip",
@@ -122,7 +121,7 @@ impl OptionsUi {
                         Page::SplitSetup
                     },
                 ),
-                Some(open("horizon.pages.open.studio", Page::Studio)),
+                None,
             ),
             // No AI hides the AI Agent page and everything AI.
             if s.extras.no_ai {

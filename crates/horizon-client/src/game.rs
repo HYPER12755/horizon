@@ -266,9 +266,6 @@ enum Screen {
     Mod,
     /// PvP & HUD's widget editor (game/interface/hud_editor.rs).
     HudEditor,
-    /// Horizon Studio script screen (`studio_screen_open`): canvas draws
-    /// itself, takes input through the screen hooks, does not draw chat.
-    Studio,
 }
 impl Screen {
     /// The id native mods see for this screen (`ScreenView.id`, the
@@ -299,7 +296,6 @@ impl Screen {
             Screen::DebugOptions => "debug_options",
             Screen::Mod => "mod",
             Screen::HudEditor => "hud_editor",
-            Screen::Studio => "studio",
         }
     }
 }
@@ -1757,9 +1753,6 @@ struct Game<'a> {
     remote: Option<remote::Remote>,
     /// The current connection came from Realms (retained for reconnect).
     realm_session: bool,
-    /// Replay playback (game/replay.rs), and Horizon Studio's editor on it (game/studio.rs).
-    pub(super) replay: replay::Replay,
-    pub(super) studio: studio::Studio,
     /// This world is open to the network (game/lan.rs).
     lan: Option<lan::LanHost>,
     /// Single player's server thread, which `remote` is connected to.
@@ -4774,7 +4767,7 @@ impl Game<'_> {
             self.native_render_gui_pre(&mut gui_canceled);
         }
         // RenderGuiEvent.Pre: a mod's cancel hides the HUD as F1 does.
-        let show_hud = !self.ui.hide_gui && !gui_canceled && !self.replay.playing();
+        let show_hud = !self.ui.hide_gui && !gui_canceled;
         // Hud.extractRenderState asks `Screen.isInGameUi` twice: such a screen
         // defers the subtitles over itself, and keeps them while F1 hides the
         // rest of the HUD.
@@ -5101,16 +5094,6 @@ impl Game<'_> {
             Screen::BlockEditor => self.draw_block_editor(&mut batch),
             Screen::DebugOptions => self.draw_debug_options(&mut batch),
             Screen::HudEditor => self.draw_hud_editor(&mut batch),
-            Screen::Studio => {
-                self.draw_screen_phase(
-                    &mut batch,
-                    horizon_client::screen_draw::RenderPhase::Background,
-                );
-                self.draw_screen_phase(
-                    &mut batch,
-                    horizon_client::screen_draw::RenderPhase::Foreground,
-                );
-            }
             Screen::Inventory => {
                 let from = batch.vertices.len();
                 self.draw_inventory(&mut batch);
@@ -5136,7 +5119,6 @@ impl Game<'_> {
             self.draw_sign_editor(&mut batch);
             self.draw_book(&mut batch);
         }
-        self.draw_studio_bars(&mut batch);
         if show_hud {
             self.draw_pad_guide(&mut batch, guide_from);
         }
@@ -5190,13 +5172,6 @@ impl Game<'_> {
     /// `Camera.setRotation`: the camera's orientation, turned round in
     /// third-person front view.
     pub(super) fn camera_orientation(&self) -> glam::Quat {
-        if self.studio.flying() {
-            return camera_rotation(
-                horizon_client::camera::CameraType::FirstPerson,
-                self.studio.freecam.yaw,
-                self.studio.freecam.pitch,
-            ) * glam::Quat::from_rotation_z(self.studio.freecam.roll.to_radians());
-        }
         match self.posed_rotation {
             // The frame's camera, already turned round in front view.
             Some((yaw, pitch)) => {
@@ -5371,7 +5346,7 @@ impl Game<'_> {
         self.mark_player(out.len(), !self.own_body_in_view());
         let player_start = out.len();
         self.mark_motion(player_start, Self::MOTION_OWN_PLAYER);
-        let player_alpha = self.own_player_alpha();
+        let player_alpha = self.clock.camera_fraction();
         self.player_model_geometry(camera, player_alpha, &mut out);
         if self.own_body_in_view()
             && let Some(p) = &self.player
@@ -8033,7 +8008,7 @@ impl Game<'_> {
         self.apply_requested_camera_type();
         let vanilla = self.camera_view(camera_alpha as f32);
         let view = vanilla.map(|view| {
-            if self.shows_panorama() || self.studio.flying() {
+            if self.shows_panorama() {
                 view
             } else {
                 self.native_camera_pose_now(camera_alpha as f32, view)
@@ -8205,8 +8180,7 @@ impl Game<'_> {
         // FishingHookRenderer's line, then DebugRenderer: chunk borders and
         // hitboxes (F3+G, F3+B).
         let mut lines = self.fishing_line(alpha, size);
-        let mut g = self.debug_gizmos(alpha as f32, camera.to_array());
-        self.studio_camera_path(&mut g);
+        let g = self.debug_gizmos(alpha as f32, camera.to_array());
         lines.extend(g.lines);
         let on_top = g.on_top;
         pr.lap("pr_debug");
@@ -8228,11 +8202,7 @@ impl Game<'_> {
             Vec::new()
         };
         pr.lap("pr_native_visuals");
-        let view = if self.studio.flying() {
-            glam::Mat4::from_quat(self.camera_orientation().conjugate())
-        } else {
-            horizon_client::camera::view_matrix(view_yaw, view_pitch)
-        };
+        let view = horizon_client::camera::view_matrix(view_yaw, view_pitch);
         let at = camera.to_array();
         // GameRenderer.render3dHud: the debug crosshair, first person with the HUD shown.
         let mut crosshair = horizon_client::gizmos::Gizmos::default();
@@ -8349,7 +8319,7 @@ impl Game<'_> {
         } else {
             self.fov_degrees(camera_alpha as f32, camera.to_array())
         };
-        let camera_effects = fov::camera_effects_enabled(title, self.studio.flying());
+        let camera_effects = !title;
         let bob = if !camera_effects {
             glam::Mat4::IDENTITY
         } else {
@@ -9277,9 +9247,6 @@ impl Game<'_> {
                         );
                         let previous = self.cursor;
                         self.cursor = (position.x as f32 / b.scale, position.y as f32 / b.scale);
-                        if self.studio_mouse_dragged(b.width) {
-                            return Ok(());
-                        }
                         match self.screen_mouse_dragged(previous) {
                             native_hooks::ScreenMousePre::Canceled => return Ok(()),
                             native_hooks::ScreenMousePre::Passed(post) => mouse_post = Some(post),
@@ -9329,8 +9296,6 @@ impl Game<'_> {
                         }
                     }
                 }
-                WindowEvent::MouseWheel { .. }
-                    if self.screen == Screen::Playing && self.replay.driver.is_some() => {}
                 WindowEvent::MouseWheel { delta, .. } => {
                     let (raw_x, raw_y) = match delta {
                         MouseScrollDelta::LineDelta(x, y) => (f64::from(x), f64::from(y)),
@@ -9600,9 +9565,6 @@ impl Game<'_> {
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
                     let pressed = state == ElementState::Pressed;
-                    if self.studio_mouse_input(pressed, button) {
-                        return Ok(());
-                    }
                     if matches!(self.screen, Screen::Inventory | Screen::Creative)
                         && let Some(key) = self
                             .settings
@@ -10089,7 +10051,6 @@ impl Game<'_> {
                     self.frame_ticks = elapsed.as_secs_f32() * 20.0;
                     self.previous = now;
                     self.upload_pace.frame(elapsed);
-                    self.studio_fly(elapsed);
                     // Arrow-key camera controls belong to gameplay; chat and
                     // other screens use the same keys for their own navigation.
                     if self.screen == Screen::Playing
@@ -10886,8 +10847,6 @@ impl<'a> Game<'a> {
             attachment_indexes: Default::default(),
             remote: None,
             realm_session: false,
-            replay: Default::default(),
-            studio: Default::default(),
             lan: None,
             integrated: None,
             level_shapes: Default::default(),
