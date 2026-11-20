@@ -7,14 +7,15 @@ function in a lower crate. A point's name, target and signature are part of the 
 `hook_snapshot` example of `horizon-mod-api-gen` on the base and on the working tree, then compares what it wrote
 (points.json, the generated API, catalog.json, hook-notes.md, loops.json, internals.json). It prints how many points were
 added, removed (accepted and failing) and changed, and fails on:
-- a removed point unless tools/mod_points_removed.txt lists it (`name | #PR | reason`) and it is not a `Game` method or
-  a published loop, and no fixture (tools/ci/fn-replace-check, the wasm host's), doc or mod manifest names it;
+- a removed point unless tools/mod_points_removed.txt lists it (`name | #PR | reason`) or it is an explicitly
+  retired feature point, and no published loop, fixture, doc or mod manifest depends on it. A `Game` method
+  requires an explicit retirement;
 - a changed point (name kept, target or hash different) unless the same file lists it;
 - an added point, unless --allow-added;
 - a difference in loops.json, and a difference in the other generated files that no accepted point change explains (the
   generated API differs whenever a point does);
-- a removed internals.json entry (one becoming `shape_only` too), and with --allow-added only that: added and changed
-  entries are listed and pass (`cargo horizon-mod update` reports signature-hash changes for declared internals).
+- a removed internals.json entry (one becoming `shape_only` too), unless the entry is fully removed and explicitly
+  retired. With --allow-added, added and changed entries pass (`cargo horizon-mod update` reports signature changes).
 Moving code out of `game/` removes its points: list them in the file. A method of `Game` keeps its name, module path and
 signature, and only its body delegates. A mod that needs a moved function asks for `#[replaceable]` in the lower crate.
 
@@ -48,6 +49,7 @@ MAX_DIFF_LINES = 120
 MAX_LISTED = 40
 ROOT_MARK = "<repository>"
 LIST = "tools/mod_points_removed.txt"
+RETIREMENTS = "tools/mod_api_retired.txt"
 # Files the generator writes into the output folder that are not output: phase timings (and incremental-*/ or, from
 # older builds, interfaces-*/, its cache).
 SCRATCH_FILES = {"points-timing.txt"}
@@ -167,7 +169,7 @@ def short(value):
 
 
 def load_accepted(path):
-    """tools/mod_points_removed.txt: point name -> (PR, reason). One `name | #PR | reason` line per point; blank lines
+    """Exception key -> (PR, reason). One `key | #PR | reason` line per entry; blank lines
     and lines starting with `#` are comments. A missing file lists nothing."""
     accepted = {}
     path = Path(path)
@@ -208,11 +210,12 @@ def loop_targets(loops_json):
 
 def references(point, files):
     """The first checked-in file that names the point (its name as a word, or its target), or None."""
-    word = re.compile(r"(?<![\w:])" + re.escape(point["name"]) + r"(?!\w)")
-    target = re.compile(r"(?<![\w:])" + re.escape(point["target"]) + r"(?!\w)")
+    name, target = point["name"], point["target"]
+    word_pattern = re.compile(r"(?<![\w:])" + re.escape(name) + r"(?!\w)")
+    target_pattern = re.compile(r"(?<![\w:])" + re.escape(target) + r"(?!\w)")
     for path in sorted(files):
         text = files[path]
-        if target.search(text) or word.search(text):
+        if (target in text and target_pattern.search(text)) or (name in text and word_pattern.search(text)):
             return path
     return None
 
@@ -233,16 +236,17 @@ def repo_texts(root=ROOT):
     return files
 
 
-def classify(removed, changed, base_points, accepted, loops, files):
+def classify(removed, changed, base_points, accepted, loops, files, retired=None):
     """Split the removed and changed points into accepted and failing: {name: reason}. A removal is accepted when it is
-    listed in the removal file and is neither a `Game` method, a loop (`loops` is None when the base's loops are
-    unknown: then no removal passes), nor named by a fixture, doc or mod manifest. A change is accepted when it is
-    listed."""
+    listed in the removal file or explicitly retired. A `Game` method requires retirement. Loops and referenced
+    points cannot be removed. A change is accepted when it is listed."""
+    retired = retired or {}
     removed_ok, removed_bad, changed_ok, changed_bad = {}, {}, {}, {}
     for name in removed:
         point = base_points[name]
         reasons = []
-        if is_game_method(point["target"]):
+        retirement = retired.get(f"point {name} {point['target']}")
+        if is_game_method(point["target"]) and retirement is None:
             reasons.append("a `Game` method")
         if loops is None:
             reasons.append("the base has no loops.json, so a published loop cannot be ruled out")
@@ -252,6 +256,8 @@ def classify(removed, changed, base_points, accepted, loops, files):
             reasons.append(f"named in {path}")
         if reasons:
             removed_bad[name] = ", ".join(reasons)
+        elif retirement is not None:
+            removed_ok[name] = retirement
         elif name not in accepted:
             removed_bad[name] = f"not listed in {LIST}"
         else:
@@ -262,6 +268,11 @@ def classify(removed, changed, base_points, accepted, loops, files):
         else:
             changed_bad[name] = f"not listed in {LIST}"
     return removed_ok, removed_bad, changed_ok, changed_bad
+
+
+def internal_retirement_key(key):
+    path, kind, cfg = key
+    return f"internal {kind} {path}" + (f" cfg {cfg}" if cfg else "")
 
 
 def summary(added, removed_ok, removed_bad, changed, changed_ok, files_added, files_removed, diffs, base_points,
@@ -319,15 +330,15 @@ def summary(added, removed_ok, removed_bad, changed, changed_ok, files_added, fi
 
 
 def verdict(added, removed_bad, changed_bad, files_added, files_removed, diffs, explained, allow_added=False,
-            internals=None):
+            internals=None, retired_internals=()):
     """0 when the catalog and the API are as they were, or differ only in ways accepted: points added (with
     allow_added), removals and changes the removal file lists. A failing removal or change always fails. The generated
     API differs whenever a point does, so those diffs pass when `explained` (a point difference was accepted), except
     loops.json, which always has to match. `internals` (internals_diff's result, internals.json left out of `diffs`)
-    passes with allow_added when it removes nothing, and never explains another file's diff."""
+    passes with allow_added when all its removals are retired, and never explains another file's diff."""
     if removed_bad or changed_bad or (added and not allow_added):
         return 1
-    if internals is not None and (internals[1] or not allow_added):
+    if internals is not None and (set(internals[1]).difference(retired_internals) or not allow_added):
         return 1
     if any(name in STRICT_FILES for name, _ in diffs):
         return 1
@@ -338,10 +349,11 @@ def verdict(added, removed_bad, changed_bad, files_added, files_removed, diffs, 
     return 0
 
 
-def compare(base_dir, head_dir, allow_added=False, base_root=None, head_root=None, accepted=None, files=None):
+def compare(base_dir, head_dir, allow_added=False, base_root=None, head_root=None, accepted=None, files=None,
+            retired=None):
     """Compare two snapshot folders, print the report and return the exit status. `accepted` is the removal file's
-    entries (default: tools/mod_points_removed.txt) and `files` a function giving the checked-in files a point may be
-    named in (default: the repository's)."""
+    entries, `retired` is the retirement file's entries, and `files` supplies the repository text to check for
+    references."""
     base_dir, head_dir = Path(base_dir), Path(head_dir)
     base_points, head_points = load_points(base_dir / POINTS), load_points(head_dir / POINTS)
     added, removed, changed = diff_points(base_points, head_points)
@@ -353,28 +365,41 @@ def compare(base_dir, head_dir, allow_added=False, base_root=None, head_root=Non
     for name in skipped:
         print(f"note: {name} exists on one side only, not compared.")
     internals = None
+    head_internal_keys = set()
     if any(name == INTERNALS for name, _ in diffs):
         # Listed by entry instead of as a diff: the file is one line of several megabytes. One that does not parse as
         # entries stays a strict file difference, in one line.
         try:
-            internals = internals_diff(read_text(base_dir / INTERNALS, [base_root] if base_root else []),
-                                       read_text(head_dir / INTERNALS, [head_root] if head_root else []))
+            head_text = read_text(head_dir / INTERNALS, [head_root] if head_root else [])
+            internals = internals_diff(read_text(base_dir / INTERNALS, [base_root] if base_root else []), head_text)
+            head_internal_keys = {(e["path"], e["kind"], e.get("cfg", "")) for e in internal_entries(head_text)}
             unreadable = None
         except (ValueError, KeyError, TypeError) as error:
             unreadable = [f"internals.json differs and does not parse as entries ({type(error).__name__}: {error})"]
         diffs = [(name, unreadable if name == INTERNALS else lines) for name, lines in diffs
                  if name != INTERNALS or unreadable]
-    if removed and files is None:
-        files = repo_texts
+    internal_removals = internals[1] if internals is not None else ()
+    repo_files = (files or repo_texts)() if removed or internal_removals else {}
     if accepted is None:
         accepted = load_accepted(ROOT / LIST)
+    if retired is None:
+        retired = load_accepted(ROOT / RETIREMENTS)
+    loops = loop_targets(base_dir / "loops.json")
+    retired_internals = [
+        key for key in internal_removals
+        if key not in head_internal_keys and internal_retirement_key(key) in retired
+        and loops is not None and normalized(key[0]) not in loops
+        and references({"name": key[0], "target": key[0]}, repo_files) is None
+    ]
     removed_ok, removed_bad, changed_ok, changed_bad = classify(
-        removed, changed, base_points, accepted, loop_targets(base_dir / "loops.json"), files() if removed else {})
+        removed, changed, base_points, accepted, loops, repo_files, retired)
     explained = bool((added and allow_added) or removed_ok or changed_ok)
     status = verdict(added, removed_bad, changed_bad, files_added, files_removed, diffs, explained, allow_added,
-                     internals)
+                     internals, retired_internals)
     lines = summary(added, removed_ok, removed_bad, changed, changed_ok, files_added, files_removed, diffs,
                     base_points, head_points, internals=internals)
+    if retired_internals:
+        lines.append(f"Explicitly retired internals: {len(retired_internals)} of {len(internal_removals)} removed.")
     counts = (f"Mod points: {len(added)} added, {len(removed)} removed ({len(removed_ok)} accepted, "
               f"{len(removed_bad)} failing), {len(changed)} changed ({len(changed_ok)} accepted, "
               f"{len(changed_bad)} failing).")
@@ -389,13 +414,12 @@ def compare(base_dir, head_dir, allow_added=False, base_root=None, head_root=Non
         if added and not allow_added:
             print("Added points fail without --allow-added.")
         if removed_bad or changed_bad:
-            print(f"A removed or changed point passes only when it is listed in {LIST} (name | #PR | reason), is not a "
-                  "`Game` method or a loop, and no fixture, doc or mod manifest names it. A mod that needs one "
-                  "asks for `#[horizon_mod_api_macros::replaceable]` in the lower crate.")
+            print(f"List moved or changed points in {LIST} and intentional feature retirements in {RETIREMENTS}. "
+                  "Published loops and referenced points are protected, as are unretired `Game` methods.")
         if any(name in STRICT_FILES for name, _ in diffs) or any(name in STRICT_FILES for name in files_removed):
             print("loops.json has to match the base exactly, and the head has to write it and internals.json.")
-        if internals is not None and (internals[1] or not allow_added):
-            print("internals.json may add or change entries with --allow-added, never remove one.")
+        if internals is not None and (set(internal_removals).difference(retired_internals) or not allow_added):
+            print("internals.json changes require --allow-added, and removals require exact retirement entries.")
         if (diffs or files_added or files_removed) and not explained:
             print("The generated API differs from the base with no accepted point change.")
     return status

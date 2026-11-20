@@ -608,17 +608,22 @@ and only its body changes to call the new function. No wrapper is needed for the
 without a sign. List each removed point in `tools/mod_points_removed.txt` (`name | #PR | reason`). A mod that needs a
 moved function asks for `#[replaceable]` on it in the lower crate, which keeps its point.
 
+When a PR removes a feature, record its retired API entries in `tools/mod_api_retired.txt`. Use
+`point <name> <target> | #PR | reason` for a point and `internal <kind> <path> | #PR | reason` for an
+internal, appending ` cfg <cfg>` to the internal key when the entry has a condition. Each entry must be removed
+in full. Published loops and entries named by checked-in fixtures, docs or mod manifests remain protected.
+
 `python3 tools/check_mod_points_unchanged.py` checks this. It runs the `hook_snapshot` example of
 `horizon-mod-api-gen` on the base (the merge base with `origin/main`, in a temporary worktree) and on your tree, and
 prints how many points were added, removed (accepted and failing) and changed. It fails when:
 
-- a point is removed and is not listed in `tools/mod_points_removed.txt`, is a `Game` method or a published loop, or is
-  named by a fixture (`tools/ci/fn-replace-check`, the wasm host's), a doc or a mod manifest;
+- a removed point is a published loop, is named by a fixture (`tools/ci/fn-replace-check`, the wasm host's), doc or
+  mod manifest, or lacks the applicable removal entry. A `Game` method requires an explicit retirement;
 - a point changes (same name, new target or signature hash) and is not listed in that file;
 - the generated API differs with no accepted point change behind it, or `loops.json` differs at all;
-- `internals.json` loses an entry, or, without `--allow-added`, differs at all. With the flag, added and changed entries
-  are listed and pass: `cargo horizon-mod update` already reports signature-hash changes for declared internals.
-  Becoming `shape_only`, or losing a `cfg` variant, counts as a removal.
+- `internals.json` loses an entry without an exact retirement entry, or, without `--allow-added`, differs at all.
+  With the flag, additions and changes pass. `cargo horizon-mod update` reports signature-hash changes for declared
+  internals. Becoming `shape_only` counts as a removal and cannot be retired while the entry remains in the catalog.
 
 CI runs it, with `--allow-added`, on a pull request that can reach the points: a change to `crates/horizon-client/src/game/`
 or `game.rs`, to the generator's crates (`crates/horizon-mod-*`), to the check itself, to a `Cargo.toml` or `Cargo.lock`,

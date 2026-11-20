@@ -5,5 +5,7 @@
 # or a published loop, and no fixture, doc or mod manifest names it. A changed point (same name, new target or
 # signature hash) passes when it is listed too. A mod that needs a moved function asks for
 # `#[horizon_mod_api_macros::replaceable]` on it in the lower crate (an issue is enough); that keeps its point.
+# For an intentionally retired feature API, see tools/mod_api_retired.txt.
 #
 # One line per point: name | #PR | short reason. Lines starting with # are comments.
+game_options_fullbright_held | #18695 | Remove the replay-only argument from the fullbright policy.

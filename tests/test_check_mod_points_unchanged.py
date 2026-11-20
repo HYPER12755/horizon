@@ -217,6 +217,27 @@ class CompareTests(unittest.TestCase):
         self.assertIn("Points removed and listed (accepted) (1):", text)
         self.assertIn("1 removed (1 accepted, 0 failing)", text)
 
+    def test_feature_retirement_only_allows_removing_the_listed_api(self):
+        target = GAME + "open_editor"
+        visible = (target, "method", "01", {})
+        other = ("game::other", "fn", "02", {})
+        retired = {
+            f"point open_editor {target}": ("#9", "editor removal"),
+            f"internal method {target}": ("#9", "editor removal"),
+        }
+        old_files = {"loops.json": NO_LOOPS, "internals.json": internals(visible, other)}
+        for new_entries, files, expected in (
+            ((other,), {}, 0),
+            ((), {}, 1),
+            ((other,), {"docs/feature.md": "Use open_editor."}, 1),
+            ((other, (target, "method", "01", {"shape_only": True})), {}, 1),
+        ):
+            with self.subTest(new_entries=new_entries, files=files):
+                new_files = {"loops.json": NO_LOOPS, "internals.json": internals(*new_entries)}
+                status, _ = self.run_compare([point("open_editor", target)], [], old_files, new_files,
+                                             retired=retired, files=files, allow_added=True)
+                self.assertEqual(status, expected)
+
     def test_a_removal_fails_when_the_base_wrote_no_loops_json(self):
         status, text = self.run_compare([point("a"), point("b", FREE + "b")], [point("a")], {"api.rs": "1"},
                                         {"api.rs": "2", "loops.json": NO_LOOPS}, accepted={"b": ("#9", "moved")})
@@ -266,7 +287,7 @@ class CompareTests(unittest.TestCase):
                                         {"internals.json": internals(A_FN), "api.rs": "2"}, allow_added=True)
         self.assertEqual(status, 1)
         self.assertIn("Internals removed (1):", text)
-        self.assertIn("never remove one", text)
+        self.assertIn("removals require exact retirement entries", text)
 
     def test_one_of_two_kinds_on_a_path_removed_fails(self):
         field, method = ("game::S::x", "field", "01", {}), ("game::S::x", "method", "02", {})

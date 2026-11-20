@@ -80,6 +80,11 @@ impl Game<'_> {
             let answered = shown > chat_at
                 || self.command_prompt.is_some()
                 || now - step_at > Duration::from_secs(15);
+            let completed = completion_message.as_ref().is_none_or(|message| {
+                self.remote
+                    .as_ref()
+                    .is_some_and(|r| r.chat.iter().any(|(line, _)| line == message))
+            });
             match step {
                 0 if spawned_at.is_some()
                     && count > 0
@@ -142,17 +147,11 @@ impl Game<'_> {
                     step = 4;
                     step_at = now;
                 }
-                4 if now - step_at > Duration::from_secs(2) => {
+                4 if completed && now - step_at > Duration::from_secs(2) => {
                     step = 3;
                     break;
                 }
-                2 if answered
-                    && completion_message.as_ref().is_none_or(|message| {
-                        self.remote
-                            .as_ref()
-                            .is_some_and(|r| r.chat.iter().any(|(line, _)| line == message))
-                    }) =>
-                {
+                2 if answered && completed => {
                     step = 3;
                     break;
                 }
@@ -160,7 +159,7 @@ impl Game<'_> {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        if step < 3 && error.is_none() {
+        if step != 3 && error.is_none() {
             error = Some(format!("timed out at step {step}"));
         }
         let chat: Vec<String> = self
