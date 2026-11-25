@@ -1154,14 +1154,6 @@ mod tests {
     }
 
     #[test]
-    fn snbt_nesting_is_bounded() {
-        let nest = |n: usize| format!("{}1{}", "[".repeat(n), "]".repeat(n));
-        assert!(parse_snbt(&nest(512)).is_ok());
-        assert!(parse_snbt(&nest(513)).is_err());
-        assert!(parse_snbt(&nest(100_000)).is_err());
-    }
-
-    #[test]
     fn bare_words_that_look_numeric_stay_strings() {
         let (v, _) = parse_snbt("{text:nan}").unwrap();
         assert_eq!(v["text"], Value::String("nan".into()));

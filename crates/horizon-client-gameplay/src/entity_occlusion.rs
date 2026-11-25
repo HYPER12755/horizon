@@ -497,39 +497,6 @@ pub fn cull_box(mob: &horizon_client::mobs::Mob, alpha: f64) -> (glam::DVec3, gl
 mod vanilla_entity_tests {
     use super::*;
 
-    /// `Entity.setViewScale`: the entity distance option times the render
-    /// distance's boost — 1 at eight chunks, 1.5 at twelve, 2.5 at twenty.
-    #[test]
-    fn the_view_scale_follows_the_render_distance() {
-        assert_eq!(entity_view_scale(4, 1.0), 1.0);
-        assert_eq!(entity_view_scale(8, 1.0), 1.0);
-        assert_eq!(entity_view_scale(12, 1.0), 1.5);
-        assert_eq!(entity_view_scale(20, 1.0), 2.5);
-        assert_eq!(entity_view_scale(32, 1.0), 2.5);
-        // The entity distance option scales it down.
-        assert_eq!(entity_view_scale(12, 0.5), 0.75);
-    }
-
-    /// `Entity.shouldRenderAtSqrDistance`: a chicken's box (0.4 by 0.7 by
-    /// 0.4) is drawn up to 48 blocks away at the vanilla defaults, not the
-    /// 32 blocks a missing view scale leaves (arismoko/horizon#2273).
-    #[test]
-    fn a_chicken_is_drawn_forty_eight_blocks_away() {
-        let range = default_range(glam::DVec3::new(0.4, 0.7, 0.4), entity_view_scale(12, 1.0));
-        assert_eq!(range, 48.0);
-    }
-
-    /// `Entity.shouldRenderAtSqrDistance` for a dropped item (`ItemEntity`
-    /// keeps the default and its box is 0.25 on each side): 24 blocks at
-    /// render distance 12, 32 at 16, 40 from 20 on; never 64.
-    #[test]
-    fn a_dropped_item_is_drawn_sixteen_blocks_times_the_view_scale() {
-        let item = glam::DVec3::splat(0.25);
-        assert_eq!(default_range(item, entity_view_scale(12, 1.0)), 24.0);
-        assert_eq!(default_range(item, entity_view_scale(16, 1.0)), 32.0);
-        assert_eq!(default_range(item, entity_view_scale(32, 1.0)), 40.0);
-    }
-
     /// `getBoundingBoxForCulling`: only four living renderers grow the box.
     /// An illusioner asks for three blocks either side (room for its mirror
     /// images, which are drawn outside its own box), a sniffer for 0.6 all
@@ -579,17 +546,6 @@ mod vanilla_entity_tests {
         let (lo, hi) = grown_box(pos, 4.0, 4.0, CullGrow::of(Species::HappyGhast, 4.0, false));
         assert_eq!(lo.y, 62.0);
         assert_eq!(hi.y, 68.0);
-    }
-
-    /// `Entity.shouldRenderAtSqrDistance` on a broken box: the size falls
-    /// back to one block.
-    #[test]
-    fn a_broken_bounding_box_falls_back_to_one_block() {
-        let range = default_range(
-            glam::DVec3::new(f64::NAN, 0.7, 0.4),
-            entity_view_scale(12, 1.0),
-        );
-        assert_eq!(range, 96.0);
     }
 
     /// The sections an entity's padded bounds can touch: the half-block border

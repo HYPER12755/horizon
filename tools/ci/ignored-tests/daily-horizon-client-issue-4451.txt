@@ -1537,7 +1537,6 @@ horizon-client game::native_hooks::fluid_tick::tests::fluid_tick_dispatch_keeps_
 horizon-client game::native_hooks::guest_death_lifecycle_tests::cancelled_corpse_teleported_in_player_tick_keeps_original_removal_deadline lib daily resources
 horizon-client game::native_hooks::guest_death_lifecycle_tests::listener_healed_guest_stays_visible_through_player_tick_teleport lib daily resources
 horizon-client game::native_hooks::hud_mode::tests::hud_mode_game_bridge_respects_client_and_guest_guards lib daily resources
-horizon-client game::native_hooks::incoming_tests::held_durability_retains_the_stack_hand_and_explicit_break_slot lib daily resources
 horizon-client game::native_hooks::ingredient_test::enumeration_tests::ingredient_keys_are_exact_for_tags_shapes_and_refuse_component_predicates lib daily resources
 horizon-client game::native_hooks::item_fall_on_tests::a_dropped_item_lands_on_a_fall_on_part lib daily resources
 horizon-client game::native_hooks::item_fall_on_tests::item_fall_on_returns_progressed_level_loan_after_part_panic lib daily resources
@@ -2171,7 +2170,6 @@ horizon-client game::persist::item_display_saved_transform_tests::item_display_m
 horizon-client game::persist::item_display_saved_transform_tests::omitted_item_display_transformation_is_saved_as_typed_identity lib daily resources
 horizon-client game::persist::loaded_tag_tests::loaded_pig_tags_cap_before_dedup_and_live_rewrites_adopt_the_set lib daily resources
 horizon-client game::persist::lookup_order_tests::chunk_loaded_families_keep_vanilla_lookup_and_save_order lib daily resources
-horizon-client game::persist::mob_hurt_cooldown_tests::the_hurt_cooldown_compares_the_incoming_damage_before_its_reductions lib daily resources
 horizon-client game::persist::mob_inventory_merge_tests::a_piglin_and_a_villager_merge_their_saved_inventory_stacks lib daily resources
 horizon-client game::persist::object_memory::namespace_review_tests::captured_content_vehicle_type_matches_its_actual_save_id lib daily resources
 horizon-client game::persist::restored_vehicle_transfer_tests::runtime_transfers_do_not_alias_a_saved_player_vehicle_with_the_same_uuid lib daily resources
